@@ -1,0 +1,115 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      # Force JavaScript actions onto Node.js 24 (Node 20 is deprecated on GitHub
+      # runners; forced 2026-06-16, removed 2026-09-16). This keeps the actions
+      # executing past Node 20 removal without changing their pinned versions.
+      # NOTE: it does NOT remove the "Node.js 20 actions are deprecated" warning —
+      # that annotation fires on each action's *declared* runtime regardless
+      # (known runner bug, actions/runner#4295). The warning clears only by
+      # bumping each action to a release that declares node24.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version and short hash
+        id: meta
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $hash    = git rev-parse --short HEAD
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "hash=$hash"       >> $env:GITHUB_OUTPUT
+          Write-Host "version=$version  hash=$hash"
+
+      - name: Set up MSVC environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Patch version strings
+        shell: pwsh
+        run: |
+          $v = '${{ steps.meta.outputs.version }}'
+
+          # Patch the C++ version header BEFORE building the service so the
+          # binary embeds the release version. This is what the service reports
+          # and what it compares against GitHub for update checks — patching it
+          # after the build (as before) left the service stuck at the 1.0.0
+          # default and unable to detect any 0.0.x release as newer.
+          $vh = Get-Content common\version.h -Raw
+          $vh = $vh -replace '"[0-9]+\.[0-9]+\.[0-9]+"', "`"$v`""
+          Set-Content common\version.h $vh
+
+          # Patch the Inno Setup script (consumed by the installer build below).
+          $iss = Get-Content wsl2ipfwd.iss -Raw
+          $iss = $iss -replace '#define AppVersion\s+"[0-9.]+"', "#define AppVersion   `"$v`""
+          Set-Content wsl2ipfwd.iss $iss
+
+          Write-Host "Patched version to $v"
+
+      - name: Build C++ targets
+        shell: pwsh
+        run: |
+          .\build.ps1 -Config Release `
+            -UpdateUrl "https://api.github.com/repos/${{ github.repository }}/releases/latest"
+
+      - name: Build C# GUI
+        shell: pwsh
+        run: |
+          $ver  = '${{ steps.meta.outputs.version }}'
+          $hash = '${{ steps.meta.outputs.hash }}'
+          dotnet build gui-cs\gui-cs.csproj -c Release `
+            -p:Version=$ver `
+            -p:SourceRevisionId=$hash
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = if (Test-Path 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe') {
+              'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          } elseif (Test-Path 'C:\Program Files (x86)\Inno Setup 7\ISCC.exe') {
+              'C:\Program Files (x86)\Inno Setup 7\ISCC.exe'
+          } else {
+              throw 'ISCC.exe not found — is Inno Setup installed?'
+          }
+          Write-Host "Using ISCC: $iscc"
+          & $iscc wsl2ipfwd.iss
+          if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl2ipfwd-setup-${{ steps.meta.outputs.version }}
+          path: build\Release\installer\wsl2ipfwd-setup.exe
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WSL2 IP Forwarder v${{ steps.meta.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: build\Release\installer\wsl2ipfwd-setup.exe

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Wsl2IpFwdGui</RootNamespace>
+    <AssemblyName>wsl2ipfwd-gui-cs</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.0.0</Version>
+    <Company>wsl2ipfwd</Company>
+    <Product>WSL2 IP Forwarder</Product>
+    <Description>Native Windows GUI for the WSL2 IP Forwarder service</Description>
+    <!-- Output next to the C++ binaries so the Inno Setup script can find everything -->
+    <OutputPath>..\build\Release\bin\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+  </PropertyGroup>
+
+</Project>

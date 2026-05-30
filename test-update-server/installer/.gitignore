@@ -1,0 +1,2 @@
+# Installer binaries are copied here by start.ps1 — don't commit them.
+*.exe

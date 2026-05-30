@@ -1,0 +1,12 @@
+{
+  "tag_name": "v1.0.1",
+  "name": "WSL2 IP Forwarder v1.0.1",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "wsl2ipfwd-setup.exe",
+      "browser_download_url": "http://localhost:8080/installer/wsl2ipfwd-setup.exe"
+    }
+  ]
+}

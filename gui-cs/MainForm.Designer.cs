@@ -56,6 +56,7 @@ partial class MainForm
     private ListView             lvPorts       = null!;
     // ColumnHeaders must be class fields so the designer can track them;
     // otherwise it drops all columns when it saves the file.
+    private ColumnHeader         colDistro     = null!;
     private ColumnHeader         colPort       = null!;
     private ColumnHeader         colLocalPort  = null!;
     private ColumnHeader         colProtocol   = null!;
@@ -117,6 +118,7 @@ partial class MainForm
         ctxConfigure = new ToolStripMenuItem();
         ctxRemove    = new ToolStripMenuItem();
         lvPorts = new ListView();
+        colDistro = new ColumnHeader();
         colPort = new ColumnHeader();
         colLocalPort = new ColumnHeader();
         colProtocol = new ColumnHeader();
@@ -538,7 +540,7 @@ partial class MainForm
         //
         // lvPorts
         //
-        lvPorts.Columns.AddRange(new ColumnHeader[] { colPort, colLocalPort, colProtocol, colInWsl, colForwarded, colFirewall, colUpnp, colRule });
+        lvPorts.Columns.AddRange(new ColumnHeader[] { colDistro, colPort, colLocalPort, colProtocol, colInWsl, colForwarded, colFirewall, colUpnp, colRule });
         lvPorts.Dock = DockStyle.Fill;
         lvPorts.Font = new Font("Segoe UI", 9F);
         lvPorts.FullRowSelect = true;
@@ -557,42 +559,48 @@ partial class MainForm
         lvPorts.SelectedIndexChanged += lvPorts_SelectedIndexChanged;
         lvPorts.DoubleClick += lvPorts_DoubleClick;
         lvPorts.Resize += lvPorts_Resize;
-        // 
+        //
+        // colDistro
+        //
+        colDistro.Name = "colDistro";
+        colDistro.Text = "Distribution";
+        colDistro.Width = 130;
+        //
         // colPort
-        // 
+        //
         colPort.Name = "colPort";
         colPort.Text = "Port";
-        colPort.Width = 100;
+        colPort.Width = 80;
         //
         // colLocalPort
         //
         colLocalPort.Name = "colLocalPort";
         colLocalPort.Text = "Local Port";
-        colLocalPort.Width = 105;
+        colLocalPort.Width = 90;
         //
         // colProtocol
         //
         colProtocol.Name = "colProtocol";
         colProtocol.Text = "Protocol";
-        colProtocol.Width = 95;
+        colProtocol.Width = 85;
         //
         // colInWsl
         //
         colInWsl.Name = "colInWsl";
         colInWsl.Text = "In WSL2";
-        colInWsl.Width = 95;
+        colInWsl.Width = 85;
         //
         // colForwarded
         //
         colForwarded.Name = "colForwarded";
         colForwarded.Text = "Forwarded";
-        colForwarded.Width = 105;
+        colForwarded.Width = 95;
         //
         // colFirewall
         //
         colFirewall.Name = "colFirewall";
         colFirewall.Text = "Firewall";
-        colFirewall.Width = 95;
+        colFirewall.Width = 85;
         //
         // colUpnp
         //

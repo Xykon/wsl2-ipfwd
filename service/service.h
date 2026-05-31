@@ -48,10 +48,30 @@ private:
     void ReportStatus(DWORD state, DWORD waitHint = 0);
     void ClearStalePendingUpdate();
     void MonitorLoop();
-    void ApplyPort(uint16_t port, const std::string& wslIp, const PortConfig& cfg);
-    void RemovePort(uint16_t port);
-    // True if the whitelist/blacklist filter says this port should be ignored.
-    bool IsPortFilteredOut(uint16_t port) const;
+    // Migrate a legacy (v1) config to the current per-distro layout.
+    void MigrateConfig();
+    // Recompute the set of distros to monitor (running ∩ enabled; empty enabled
+    // list = all running) and tear down rules for distros that stopped.
+    void RefreshMonitoredDistros();
+    // Detect/forward/notify for a single distro's ports (one staggered tick).
+    void ProcessDistro(const std::string& distro);
+
+    void ApplyPort(const std::string& distro, uint16_t port,
+                   const std::string& wslIp, const PortConfig& cfg);
+    void RemovePort(const std::string& distro, uint16_t port);
+    void RemoveDistroRules(const std::string& distro);
+
+    // OS-level portproxy/firewall rules are keyed only by the Windows listen
+    // port, so two distributions handing off the same port (shared WSL2 network
+    // namespace) share one rule. These return true if a distribution OTHER than
+    // `distro` still has an active rule on `listenPort`, so we don't tear down a
+    // rule the new owner is using.
+    bool ListenPortForwardedByOther(const std::string& distro, uint16_t listenPort) const;
+    bool ListenPortFirewalledByOther(const std::string& distro, uint16_t listenPort) const;
+    // True if the whitelist/blacklist filter says this port should be ignored
+    // for the given distribution. The effective filter set for a distro is its
+    // distro-scoped entries plus all general (untagged) entries.
+    bool IsPortFilteredOut(uint16_t port, const std::string& distro) const;
     // Windows-side listen port for a config entry. In mirrored/virtioproxy modes
     // custom local ports don't work (the portproxy can't hairpin to the shared
     // host IP), so this returns the WSL port and ignores cfg.local_port.
@@ -62,6 +82,7 @@ private:
     void RefreshNetMode(const std::string& wslIp);
     std::wstring UserWslConfigPath();
     void RemoveAllRules();
+    void PublishUpnpDesired();   // rebuild UPnP desired set from all active ports
     std::string HandleRequest(const std::string& json);
 
     // Show a Windows notification balloon in the active user's session
@@ -89,15 +110,22 @@ private:
     std::chrono::steady_clock::time_point startTime_;
 
     GlobalConfig         config_;
-    std::map<uint16_t, ActivePort> activePorts_;
-    std::string          currentWslIp_;
+
+    // Per-distro runtime state (distro name -> ...).
+    std::map<std::string, std::map<uint16_t, ActivePort>> activePorts_;
+    std::map<std::string, std::set<uint16_t>>             seenPorts_;
+    std::map<std::string, std::string>                    distroIps_;       // last known IP
+    std::map<std::string, std::vector<WslPortInfo>>       detectedPorts_;   // cache for list_ports
+
+    // Round-robin staggering across monitored distros.
+    std::vector<std::string> monitoredDistros_;
+    size_t                    distroIndex_ = 0;
+    std::chrono::steady_clock::time_point lastDistroEnum_{};
 
     // Networking mode (read from .wslconfig; IP heuristic as fallback).
     std::atomic<int>     netMode_{0};       // NetMode value
     std::wstring         wslConfigPath_;    // cached path to the user's .wslconfig
 
-    // New-port notification tracking
-    std::set<uint16_t>    seenPorts_;        // ports already processed this session
     std::string           notifiedUpdateVer_; // version for which we've already shown a balloon
 
     // Update checker
@@ -114,7 +142,7 @@ private:
     bool   interactive_{false}; // true when running via --debug (prints to stdout)
     bool   trace_{false};       // true when --trace is also passed: log every poll cycle
 
-    // Change-detection state for --debug (non-trace) mode
-    std::set<uint16_t> lastPollPorts_;    // port set from the previous poll
-    std::string        lastLoggedWslIp_;  // WSL IP from the previous poll
+    // Change-detection state for --debug (non-trace) mode, per distro.
+    std::map<std::string, std::set<uint16_t>> lastPollPorts_;
+    std::map<std::string, std::string>        lastLoggedIp_;
 };

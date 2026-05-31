@@ -8,6 +8,7 @@ public partial class SettingsDialog : Form
 {
     private readonly GlobalConfig  _origCfg;
     private readonly LocalSettings _origLocal;
+    private readonly List<DistroEntry> _distros;
 
     // Optional callback: when provided the "Check now" button performs an
     // inline async check and shows the result without closing the dialog.
@@ -34,16 +35,17 @@ public partial class SettingsDialog : Form
     private Label        lblCheckResult    = null!;
 
     // WSL2 tab
+    private GroupBox      grpDistros      = null!;
+    private CheckedListBox clbDistros     = null!;
+    private Label         lblDistroHint   = null!;
     private GroupBox      grpWsl          = null!;
     private GroupBox      grpNet          = null!;
     private GroupBox      grpLog          = null!;
-    private Label         lblWslDistro    = null!;
     private Label         lblPollInterval = null!;
     private Label         lblOfflineThres = null!;
     private Label         lblListenAddr   = null!;
     private Label         lblLogLevel     = null!;
     private Label         lblLogNote      = null!;
-    private TextBox       txtDistro       = null!;
     private NumericUpDown numPoll         = null!;
     private NumericUpDown numOffline      = null!;
     private TextBox       txtListenAddr   = null!;
@@ -54,6 +56,7 @@ public partial class SettingsDialog : Form
     private DataGridView             dgvAutoFwd        = null!;
     private DataGridViewTextBoxColumn colAutoFwdExpr   = null!;
     private DataGridViewTextBoxColumn colAutoFwdLocal  = null!;
+    private DataGridViewComboBoxColumn colAutoFwdDistro= null!;
     private DataGridViewTextBoxColumn colAutoFwdComment= null!;
     private Button                   btnAutoFwdAdd     = null!;
     private Button                   btnAutoFwdRemove  = null!;
@@ -68,7 +71,11 @@ public partial class SettingsDialog : Form
     private Label                    lblFilterHint     = null!;
     private DataGridView             dgvFilter         = null!;
     private DataGridViewTextBoxColumn colFiltExpr      = null!;
+    private DataGridViewComboBoxColumn colFiltDistro   = null!;
     private DataGridViewTextBoxColumn colFiltComment   = null!;
+
+    // Display label for the "applies to all distributions" (empty) combo value.
+    private const string AllDistros = "(All)";
     private Button                   btnFilterAdd      = null!;
     private Button                   btnFilterRemove   = null!;
 
@@ -81,13 +88,15 @@ public partial class SettingsDialog : Form
     private Button btnCancel = null!;
 
     // Parameterless constructor used by the VS designer at design time.
-    public SettingsDialog() : this(new GlobalConfig(), new LocalSettings()) { }
+    public SettingsDialog() : this(new GlobalConfig(), new LocalSettings(), new List<DistroEntry>()) { }
 
     public SettingsDialog(GlobalConfig config, LocalSettings local,
+        List<DistroEntry> distros,
         Func<Task<UpdateInfo?>>? checkForUpdateAsync = null)
     {
         _origCfg             = config;
         _origLocal           = local;
+        _distros             = distros;
         _checkForUpdateAsync = checkForUpdateAsync;
         InitializeComponent();
         PopulateFields();
@@ -108,16 +117,34 @@ public partial class SettingsDialog : Form
         UpdateUpdateCheckState();
         UpdateNotifyState();
 
-        // WSL2 tab
-        txtDistro.Text     = _origCfg.WslDistro;
+        // WSL2 tab — distro checklist
+        clbDistros.Items.Clear();
+        foreach (var d in _distros)
+        {
+            string label = d.Name
+                         + (d.IsDefault ? "  (default)" : "")
+                         + (d.Running   ? ""            : "  — stopped");
+            clbDistros.Items.Add(new DistroItem { Name = d.Name, Display = label }, d.Enabled);
+        }
         numPoll.Value      = Math.Clamp(_origCfg.PollIntervalMs,     (int)numPoll.Minimum,    (int)numPoll.Maximum);
         numOffline.Value   = Math.Clamp(_origCfg.OfflineThresholdMs, (int)numOffline.Minimum, (int)numOffline.Maximum);
         txtListenAddr.Text = _origCfg.ListenAddress;
         cmbLogLevel.SelectedIndex = Math.Clamp(_origCfg.LogLevel, 0, cmbLogLevel.Items.Count - 1);
 
+        // Distribution combo columns — populated from installed distros + (All).
+        // Swallow combobox DataErrors (e.g. a saved distro no longer installed)
+        // rather than throwing.
+        dgvAutoFwd.DataError += (s, e) => e.ThrowException = false;
+        dgvFilter.DataError  += (s, e) => e.ThrowException = false;
+        PopulateDistroCombo(colAutoFwdDistro);
+        PopulateDistroCombo(colFiltDistro);
+
         // Auto Forward tab
         foreach (var f in _origLocal.AutoForwardEntries)
-            dgvAutoFwd.Rows.Add(f.Expression, f.LocalExpression, f.Comment);
+        {
+            EnsureDistroItem(colAutoFwdDistro, f.Distro);
+            dgvAutoFwd.Rows.Add(f.Expression, f.LocalExpression, DistroToCell(f.Distro), f.Comment);
+        }
         chkFwPublic.Checked  = _origCfg.AutoForwardFwPublic;
         chkFwPrivate.Checked = _origCfg.AutoForwardFwPrivate;
         chkFwDomain.Checked  = _origCfg.AutoForwardFwDomain;
@@ -127,7 +154,10 @@ public partial class SettingsDialog : Form
         rbBlacklist.Checked = !_origLocal.PortFilterIsWhitelist;
         UpdateFilterHint();
         foreach (var f in _origLocal.PortFilters)
-            dgvFilter.Rows.Add(f.Expression, f.Comment);
+        {
+            EnsureDistroItem(colFiltDistro, f.Distro);
+            dgvFilter.Rows.Add(f.Expression, DistroToCell(f.Distro), f.Comment);
+        }
 
         // Event wiring (done here so InitializeComponent stays designer-safe)
         chkNotify.CheckedChanged      += chkNotify_CheckedChanged;
@@ -236,7 +266,7 @@ public partial class SettingsDialog : Form
 
     private void btnAutoFwdAdd_Click(object? sender, EventArgs e)
     {
-        int idx = dgvAutoFwd.Rows.Add("", "", "");
+        int idx = dgvAutoFwd.Rows.Add("", "", AllDistros, "");
         dgvAutoFwd.CurrentCell = dgvAutoFwd.Rows[idx].Cells[0];
         dgvAutoFwd.BeginEdit(true);
     }
@@ -253,7 +283,7 @@ public partial class SettingsDialog : Form
 
     private void btnFilterAdd_Click(object? sender, EventArgs e)
     {
-        int idx = dgvFilter.Rows.Add("", "");
+        int idx = dgvFilter.Rows.Add("", AllDistros, "");
         dgvFilter.CurrentCell = dgvFilter.Rows[idx].Cells[0];
         dgvFilter.BeginEdit(true);
     }
@@ -328,9 +358,13 @@ public partial class SettingsDialog : Form
     public GlobalConfig GetConfig()
     {
         var _autoFwd = ExtractAutoFwd();
+        var _filter  = ExtractFilter();
+        var checkedDistros = new List<string>();
+        foreach (var item in clbDistros.CheckedItems)
+            if (item is DistroItem di) checkedDistros.Add(di.Name);
         return new()
     {
-        WslDistro                = txtDistro.Text.Trim(),
+        WslDistros               = checkedDistros,
         PollIntervalMs           = (int)numPoll.Value,
         OfflineThresholdMs       = (int)numOffline.Value,
         ListenAddress            = txtListenAddr.Text.Trim(),
@@ -341,12 +375,14 @@ public partial class SettingsDialog : Form
         UpdateCheckIntervalHours = cmbUpdateInterval.SelectedIndex == 1 ? 168 : 24,
         AutoForwardExpressions      = _autoFwd.Wsl,
         AutoForwardLocalExpressions = _autoFwd.Local,
+        AutoForwardDistros          = _autoFwd.Distros,
         AutoForwardFwPublic      = chkFwPublic.Checked,
         AutoForwardFwPrivate     = chkFwPrivate.Checked,
         AutoForwardFwDomain      = chkFwDomain.Checked,
         // Port filter mode + expressions — sent to service for notification filtering
         PortFilterIsWhitelist    = rbWhitelist.Checked,
-        PortFilterExpressions    = ExtractGridExpressions(dgvFilter),
+        PortFilterExpressions    = _filter.Exprs,
+        PortFilterDistros        = _filter.Distros,
         // Preserve service-managed fields not shown in the UI
         IgnoreSystemPorts  = _origCfg.IgnoreSystemPorts,
         NotifyIgnorePorts  = _origCfg.NotifyIgnorePorts
@@ -367,18 +403,38 @@ public partial class SettingsDialog : Form
     /// Extracts the auto-forward grid as two index-aligned lists (WSL expression
     /// and parallel local expression), skipping rows with an empty WSL expression.
     /// </summary>
-    private (List<string> Wsl, List<string> Local) ExtractAutoFwd()
+    private (List<string> Wsl, List<string> Local, List<string> Distros) ExtractAutoFwd()
     {
-        var wsl   = new List<string>();
-        var local = new List<string>();
+        var wsl     = new List<string>();
+        var local   = new List<string>();
+        var distros = new List<string>();
         foreach (DataGridViewRow row in dgvAutoFwd.Rows)
         {
             var expr = row.Cells[0].Value?.ToString()?.Trim() ?? "";
             if (string.IsNullOrEmpty(expr)) continue;
             wsl.Add(expr);
             local.Add(row.Cells[1].Value?.ToString()?.Trim() ?? "");
+            distros.Add(CellToDistro(row.Cells[2].Value));
         }
-        return (wsl, local);
+        return (wsl, local, distros);
+    }
+
+    /// <summary>
+    /// Extracts the port-filter grid as two index-aligned lists (expression and
+    /// parallel distribution scope), skipping rows with an empty expression.
+    /// </summary>
+    private (List<string> Exprs, List<string> Distros) ExtractFilter()
+    {
+        var exprs   = new List<string>();
+        var distros = new List<string>();
+        foreach (DataGridViewRow row in dgvFilter.Rows)
+        {
+            var expr = row.Cells[0].Value?.ToString()?.Trim() ?? "";
+            if (string.IsNullOrEmpty(expr)) continue;
+            exprs.Add(expr);
+            distros.Add(CellToDistro(row.Cells[1].Value));
+        }
+        return (exprs, distros);
     }
 
     /// <summary>Auto-forward rows as PortFilterEntry (Expression + LocalExpression + Comment).</summary>
@@ -393,7 +449,8 @@ public partial class SettingsDialog : Form
             {
                 Expression      = expr,
                 LocalExpression = row.Cells[1].Value?.ToString()?.Trim() ?? "",
-                Comment         = row.Cells[2].Value?.ToString()?.Trim() ?? ""
+                Distro          = CellToDistro(row.Cells[2].Value),
+                Comment         = row.Cells[3].Value?.ToString()?.Trim() ?? ""
             });
         }
         return list;
@@ -412,33 +469,42 @@ public partial class SettingsDialog : Form
     /// </summary>
     private void UpdateConflictWarnings()
     {
-        // Collect auto-forward expressions with their parsed intervals
-        var autoEntries = new List<(string Expr, List<(int Lo, int Hi)> Iv)>();
+        // Collect auto-forward expressions with their parsed intervals and scope.
+        var autoEntries = new List<(string Expr, string Distro, List<(int Lo, int Hi)> Iv)>();
         foreach (DataGridViewRow row in dgvAutoFwd.Rows)
         {
             var expr = row.Cells[0].Value?.ToString()?.Trim() ?? "";
             if (!string.IsNullOrEmpty(expr))
-                autoEntries.Add((expr, ParseIntervals(expr)));
+                autoEntries.Add((expr, CellToDistro(row.Cells[2].Value), ParseIntervals(expr)));
         }
 
-        // Union of all port-filter intervals
-        var filterIv = new List<(int Lo, int Hi)>();
+        // Collect port-filter intervals with their scope.
+        var filterEntries = new List<(string Distro, List<(int Lo, int Hi)> Iv)>();
         foreach (DataGridViewRow row in dgvFilter.Rows)
         {
             var expr = row.Cells[0].Value?.ToString()?.Trim() ?? "";
             if (!string.IsNullOrEmpty(expr))
-                filterIv.AddRange(ParseIntervals(expr));
+                filterEntries.Add((CellToDistro(row.Cells[1].Value), ParseIntervals(expr)));
         }
 
         bool whitelist = rbWhitelist.Checked;
 
-        // Only warn when both sides are non-empty — an empty filter never hides anything
+        // Only warn when both sides are non-empty — an empty filter never hides anything.
         var conflicts = new List<string>();
-        if (autoEntries.Count > 0 && filterIv.Count > 0)
+        if (autoEntries.Count > 0 && filterEntries.Count > 0)
         {
-            foreach (var (expr, iv) in autoEntries)
+            foreach (var (expr, aDistro, iv) in autoEntries)
             {
-                bool overlaps = IntervalsOverlap(iv, filterIv);
+                // The filter intervals that could affect this rule: those whose
+                // scope is compatible (general "", or the same distro, or the
+                // rule itself is general / applies to all).
+                var relevant = new List<(int Lo, int Hi)>();
+                foreach (var (fDistro, fIv) in filterEntries)
+                    if (fDistro.Length == 0 || aDistro.Length == 0 || fDistro == aDistro)
+                        relevant.AddRange(fIv);
+                if (relevant.Count == 0) continue;
+
+                bool overlaps = IntervalsOverlap(iv, relevant);
                 bool conflict = whitelist ? !overlaps : overlaps;
                 if (conflict) conflicts.Add(expr);
             }
@@ -494,15 +560,43 @@ public partial class SettingsDialog : Form
         return false;
     }
 
-    private static List<string> ExtractGridExpressions(DataGridView dgv)
+    // ---- Distribution combo helpers -----------------------------------------
+
+    /// <summary>Fills a grid combo column with "(All)" plus every installed distro.</summary>
+    private void PopulateDistroCombo(DataGridViewComboBoxColumn col)
     {
-        var list = new List<string>();
-        foreach (DataGridViewRow row in dgv.Rows)
-        {
-            var expr = row.Cells[0].Value?.ToString()?.Trim() ?? "";
-            if (!string.IsNullOrEmpty(expr)) list.Add(expr);
-        }
-        return list;
+        col.Items.Clear();
+        col.Items.Add(AllDistros);
+        foreach (var d in _distros)
+            if (!col.Items.Contains(d.Name)) col.Items.Add(d.Name);
+    }
+
+    /// <summary>Adds a distro to the combo's item list if missing (e.g. a saved
+    /// rule references a distro that isn't currently installed).</summary>
+    private static void EnsureDistroItem(DataGridViewComboBoxColumn col, string distro)
+    {
+        if (!string.IsNullOrEmpty(distro) && !col.Items.Contains(distro))
+            col.Items.Add(distro);
+    }
+
+    /// <summary>Maps a stored distro string to its combo cell value (empty = "(All)").</summary>
+    private static string DistroToCell(string distro)
+        => string.IsNullOrEmpty(distro) ? AllDistros : distro;
+
+    /// <summary>Maps a combo cell value back to the stored distro string ("(All)" = empty).</summary>
+    private static string CellToDistro(object? cellValue)
+    {
+        var s = cellValue?.ToString() ?? "";
+        return s == AllDistros ? "" : s.Trim();
+    }
+
+    // Item type for the distro CheckedListBox: stores the distro name and a
+    // display label (Display is what the list shows).
+    private sealed class DistroItem
+    {
+        public string Name    = "";
+        public string Display = "";
+        public override string ToString() => Display;
     }
 
     private static List<PortFilterEntry> ExtractGridEntries(DataGridView dgv)
@@ -515,7 +609,8 @@ public partial class SettingsDialog : Form
                 list.Add(new PortFilterEntry
                 {
                     Expression = expr,
-                    Comment    = row.Cells[1].Value?.ToString()?.Trim() ?? ""
+                    Distro     = CellToDistro(row.Cells[1].Value),
+                    Comment    = row.Cells[2].Value?.ToString()?.Trim() ?? ""
                 });
         }
         return list;
@@ -565,8 +660,10 @@ public partial class SettingsDialog : Form
         this.dgvFilter         = new DataGridView();
         this.colAutoFwdExpr    = new DataGridViewTextBoxColumn();
         this.colAutoFwdLocal   = new DataGridViewTextBoxColumn();
+        this.colAutoFwdDistro  = new DataGridViewComboBoxColumn();
         this.colAutoFwdComment = new DataGridViewTextBoxColumn();
         this.colFiltExpr       = new DataGridViewTextBoxColumn();
+        this.colFiltDistro     = new DataGridViewComboBoxColumn();
         this.colFiltComment    = new DataGridViewTextBoxColumn();
         ((System.ComponentModel.ISupportInitialize)(this.dgvAutoFwd)).BeginInit();
         ((System.ComponentModel.ISupportInitialize)(this.dgvFilter)).BeginInit();
@@ -695,29 +792,45 @@ public partial class SettingsDialog : Form
         // Tab 2: WSL2
         // ====================================================================
 
+        // ---- Distributions group --------------------------------------------
+        this.grpDistros          = new GroupBox();
+        this.grpDistros.Text     = "Distributions to monitor";
+        this.grpDistros.Location = new Point(8, 6);
+        this.grpDistros.Size     = new Size(440, 98);
+        this.grpDistros.Name     = "grpDistros";
+
+        this.clbDistros               = new CheckedListBox();
+        this.clbDistros.Location      = new Point(10, 18);
+        this.clbDistros.Size          = new Size(420, 54);
+        this.clbDistros.CheckOnClick  = true;
+        this.clbDistros.IntegralHeight = false;
+        this.clbDistros.Name          = "clbDistros";
+
+        this.lblDistroHint           = new Label();
+        this.lblDistroHint.Text      = "None checked = monitor all running distributions.";
+        this.lblDistroHint.Location  = new Point(10, 76);
+        this.lblDistroHint.Size      = new Size(420, 16);
+        this.lblDistroHint.ForeColor = SystemColors.GrayText;
+        this.lblDistroHint.Font      = new Font("Segoe UI", 7.5f);
+        this.lblDistroHint.Name      = "lblDistroHint";
+
+        this.grpDistros.Controls.Add(this.clbDistros);
+        this.grpDistros.Controls.Add(this.lblDistroHint);
+
+        // ---- Polling group --------------------------------------------------
         this.grpWsl          = new GroupBox();
-        this.grpWsl.Text     = "WSL2 / Polling";
-        this.grpWsl.Location = new Point(8, 8);
-        this.grpWsl.Size     = new Size(440, 108);
+        this.grpWsl.Text     = "Polling";
+        this.grpWsl.Location = new Point(8, 110);
+        this.grpWsl.Size     = new Size(440, 78);
         this.grpWsl.Name     = "grpWsl";
-
-        this.lblWslDistro          = new Label();
-        this.lblWslDistro.Text     = "WSL2 distro (blank = default):";
-        this.lblWslDistro.Location = new Point(8, 21);
-        this.lblWslDistro.AutoSize = true;
-
-        this.txtDistro                 = new TextBox();
-        this.txtDistro.Location        = new Point(200, 18);
-        this.txtDistro.Width           = 224;
-        this.txtDistro.PlaceholderText = "(default distro)";
 
         this.lblPollInterval          = new Label();
         this.lblPollInterval.Text     = "Poll interval (ms):";
-        this.lblPollInterval.Location = new Point(8, 49);
+        this.lblPollInterval.Location = new Point(8, 23);
         this.lblPollInterval.AutoSize = true;
 
         this.numPoll           = new NumericUpDown();
-        this.numPoll.Location  = new Point(200, 46);
+        this.numPoll.Location  = new Point(200, 20);
         this.numPoll.Width     = 100;
         this.numPoll.Minimum   = 1000;
         this.numPoll.Maximum   = 60000;
@@ -725,18 +838,16 @@ public partial class SettingsDialog : Form
 
         this.lblOfflineThres          = new Label();
         this.lblOfflineThres.Text     = "Offline threshold (ms):";
-        this.lblOfflineThres.Location = new Point(8, 77);
+        this.lblOfflineThres.Location = new Point(8, 51);
         this.lblOfflineThres.AutoSize = true;
 
         this.numOffline           = new NumericUpDown();
-        this.numOffline.Location  = new Point(200, 74);
+        this.numOffline.Location  = new Point(200, 48);
         this.numOffline.Width     = 100;
         this.numOffline.Minimum   = 5000;
         this.numOffline.Maximum   = 300000;
         this.numOffline.Increment = 5000;
 
-        this.grpWsl.Controls.Add(this.lblWslDistro);
-        this.grpWsl.Controls.Add(this.txtDistro);
         this.grpWsl.Controls.Add(this.lblPollInterval);
         this.grpWsl.Controls.Add(this.numPoll);
         this.grpWsl.Controls.Add(this.lblOfflineThres);
@@ -744,17 +855,17 @@ public partial class SettingsDialog : Form
 
         this.grpNet          = new GroupBox();
         this.grpNet.Text     = "Networking";
-        this.grpNet.Location = new Point(8, 122);
-        this.grpNet.Size     = new Size(440, 52);
+        this.grpNet.Location = new Point(8, 194);
+        this.grpNet.Size     = new Size(440, 50);
         this.grpNet.Name     = "grpNet";
 
         this.lblListenAddr          = new Label();
         this.lblListenAddr.Text     = "Listen address:";
-        this.lblListenAddr.Location = new Point(8, 21);
+        this.lblListenAddr.Location = new Point(8, 20);
         this.lblListenAddr.AutoSize = true;
 
         this.txtListenAddr                 = new TextBox();
-        this.txtListenAddr.Location        = new Point(200, 18);
+        this.txtListenAddr.Location        = new Point(200, 17);
         this.txtListenAddr.Width           = 224;
         this.txtListenAddr.PlaceholderText = "0.0.0.0";
 
@@ -764,13 +875,13 @@ public partial class SettingsDialog : Form
         // ---- Logging group --------------------------------------------------
         this.grpLog          = new GroupBox();
         this.grpLog.Text     = "Logging";
-        this.grpLog.Location = new Point(8, 180);
-        this.grpLog.Size     = new Size(440, 88);
+        this.grpLog.Location = new Point(8, 250);
+        this.grpLog.Size     = new Size(440, 86);
         this.grpLog.Name     = "grpLog";
 
         this.lblLogLevel          = new Label();
         this.lblLogLevel.Text     = "Service log level:";
-        this.lblLogLevel.Location = new Point(8, 25);
+        this.lblLogLevel.Location = new Point(8, 24);
         this.lblLogLevel.AutoSize = true;
 
         this.cmbLogLevel               = new ComboBox();
@@ -779,15 +890,15 @@ public partial class SettingsDialog : Form
             "Normal  (events only)",
             "Debug  (log port changes)",
             "Trace  (log every poll)" });
-        this.cmbLogLevel.Location = new Point(200, 22);
+        this.cmbLogLevel.Location = new Point(200, 21);
         this.cmbLogLevel.Width    = 224;
         this.cmbLogLevel.Name     = "cmbLogLevel";
 
         this.lblLogNote           = new Label();
         this.lblLogNote.Text      = "Written to service.log in %ProgramData%\\wsl2ipfwd.\n" +
                                     "Applies within a few seconds; restart the service to apply immediately.";
-        this.lblLogNote.Location  = new Point(8, 50);
-        this.lblLogNote.Size      = new Size(424, 30);
+        this.lblLogNote.Location  = new Point(8, 48);
+        this.lblLogNote.Size      = new Size(424, 32);
         this.lblLogNote.ForeColor = SystemColors.GrayText;
         this.lblLogNote.Font      = new Font("Segoe UI", 7.5f);
         this.lblLogNote.Name      = "lblLogNote";
@@ -796,6 +907,7 @@ public partial class SettingsDialog : Form
         this.grpLog.Controls.Add(this.cmbLogLevel);
         this.grpLog.Controls.Add(this.lblLogNote);
 
+        this.tabWsl2.Controls.Add(this.grpDistros);
         this.tabWsl2.Controls.Add(this.grpWsl);
         this.tabWsl2.Controls.Add(this.grpNet);
         this.tabWsl2.Controls.Add(this.grpLog);
@@ -816,22 +928,31 @@ public partial class SettingsDialog : Form
         // dgvAutoFwd columns
         this.colAutoFwdExpr.HeaderText   = "WSL2 Port";
         this.colAutoFwdExpr.Name         = "colAutoFwdExpr";
-        this.colAutoFwdExpr.Width        = 130;
+        this.colAutoFwdExpr.Width        = 100;
         this.colAutoFwdExpr.MinimumWidth = 60;
 
         this.colAutoFwdLocal.HeaderText   = "Local Port";
         this.colAutoFwdLocal.Name         = "colAutoFwdLocal";
-        this.colAutoFwdLocal.Width        = 130;
+        this.colAutoFwdLocal.Width        = 95;
         this.colAutoFwdLocal.MinimumWidth = 60;
         this.colAutoFwdLocal.ToolTipText  = "Optional. Leave blank to use the same port. " +
                                             "Must mirror the WSL2 Port structure (same count / same range span).";
+
+        this.colAutoFwdDistro.HeaderText   = "Distribution";
+        this.colAutoFwdDistro.Name         = "colAutoFwdDistro";
+        this.colAutoFwdDistro.Width        = 110;
+        this.colAutoFwdDistro.MinimumWidth = 70;
+        this.colAutoFwdDistro.FlatStyle    = FlatStyle.Flat;
+        this.colAutoFwdDistro.DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton;
+        this.colAutoFwdDistro.ToolTipText  = "Limit this rule to a distribution. (All) applies to every " +
+                                             "distribution; a distro-specific rule overrides an (All) rule.";
 
         this.colAutoFwdComment.HeaderText   = "Comment  (optional)";
         this.colAutoFwdComment.Name         = "colAutoFwdComment";
         this.colAutoFwdComment.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
         this.colAutoFwdComment.MinimumWidth = 60;
 
-        this.dgvAutoFwd.Columns.AddRange(new DataGridViewColumn[] { this.colAutoFwdExpr, this.colAutoFwdLocal, this.colAutoFwdComment });
+        this.dgvAutoFwd.Columns.AddRange(new DataGridViewColumn[] { this.colAutoFwdExpr, this.colAutoFwdLocal, this.colAutoFwdDistro, this.colAutoFwdComment });
         this.dgvAutoFwd.AllowUserToAddRows              = false;
         this.dgvAutoFwd.AllowUserToDeleteRows           = false;
         this.dgvAutoFwd.BackgroundColor                 = SystemColors.Window;
@@ -935,15 +1056,24 @@ public partial class SettingsDialog : Form
         // dgvFilter columns
         this.colFiltExpr.HeaderText   = "Filter";
         this.colFiltExpr.Name         = "colFiltExpr";
-        this.colFiltExpr.Width        = 150;
+        this.colFiltExpr.Width        = 140;
         this.colFiltExpr.MinimumWidth = 60;
+
+        this.colFiltDistro.HeaderText   = "Distribution";
+        this.colFiltDistro.Name         = "colFiltDistro";
+        this.colFiltDistro.Width        = 120;
+        this.colFiltDistro.MinimumWidth = 70;
+        this.colFiltDistro.FlatStyle    = FlatStyle.Flat;
+        this.colFiltDistro.DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton;
+        this.colFiltDistro.ToolTipText  = "Limit this filter entry to a distribution. (All) applies to " +
+                                          "every distribution.";
 
         this.colFiltComment.HeaderText   = "Comment  (optional)";
         this.colFiltComment.Name         = "colFiltComment";
         this.colFiltComment.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
         this.colFiltComment.MinimumWidth = 60;
 
-        this.dgvFilter.Columns.AddRange(new DataGridViewColumn[] { this.colFiltExpr, this.colFiltComment });
+        this.dgvFilter.Columns.AddRange(new DataGridViewColumn[] { this.colFiltExpr, this.colFiltDistro, this.colFiltComment });
         this.dgvFilter.AllowUserToAddRows              = false;
         this.dgvFilter.AllowUserToDeleteRows           = false;
         this.dgvFilter.BackgroundColor                 = SystemColors.Window;

@@ -20,13 +20,15 @@ constexpr const char* CMD_GET_STATUS    = "get_status";    // -> StatusInfo
 constexpr const char* CMD_REMOVE_PORT   = "remove_port";   // body: {port} -> ok (force remove rule)
 constexpr const char* CMD_GET_UPDATE_INFO  = "get_update_info";  // -> {available, version, url}
 constexpr const char* CMD_CHECK_UPDATE_NOW = "check_update_now"; // trigger immediate check -> ok
+constexpr const char* CMD_LIST_DISTROS     = "list_distros";     // -> array of {name, running, default}
 
 // PortEntry JSON keys (in list_ports response data array)
-//  port, protocol, detected, forwarded, firewall_active, last_seen_ms
-//  config: { enabled, fw_domain, fw_private, fw_public }
+//  distro, port, protocol, detected, forwarded, firewall_active, upnp_active, last_seen_ms
+//  config: { enabled, fw_domain, fw_private, fw_public, local_port, upnp_* }
+// set_port_cfg / remove_port bodies include "distro".
 
 // GlobalConfig JSON keys
-//  wsl_distro, poll_interval_ms, offline_threshold_ms, listen_address
+//  config_version, wsl_distros[], poll_interval_ms, offline_threshold_ms, listen_address
 
 // StatusInfo JSON keys
 //  wsl_ip, wsl_running, service_uptime_s, active_forwardings

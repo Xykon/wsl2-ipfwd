@@ -52,18 +52,10 @@ void Wsl2IpFwdService::RunInteractive(bool trace) {
 
     Log("=== WSL2 IP Forwarder -- debug mode ===");
     config_ = Config::Load();
-    Log("Config loaded. Distro: \"" + (config_.wsl_distro.empty() ? "(default)" : config_.wsl_distro) + "\"");
+    MigrateConfig();
     Log("Poll interval: " + std::to_string(config_.poll_interval_ms) + " ms  |  Offline threshold: " + std::to_string(config_.offline_threshold_ms) + " ms");
 
     ClearStalePendingUpdate();
-
-    monitor_.SetDistro(config_.wsl_distro);
-
-    std::string wslIp = monitor_.GetWslIp();
-    if (wslIp.empty())
-        Log("WARNING: Could not get WSL2 IP — WSL may not be running.");
-    else
-        Log("WSL2 IP: " + wslIp);
 
     if (!firewall_.Initialize())
         Log("WARNING: Firewall COM init failed (run as administrator?)");
@@ -100,8 +92,8 @@ void Wsl2IpFwdService::ServiceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
 
     OpenLog();
     config_ = Config::Load();
+    MigrateConfig();
     ClearStalePendingUpdate();
-    monitor_.SetDistro(config_.wsl_distro);
     firewall_.Initialize();
     ipcServer_.Start();
     upnp_.SetLogger([this](const std::string& m) { Log("[UPnP] " + m); });
@@ -253,11 +245,22 @@ static uint16_t MappedLocalPort(uint16_t port,
 // be hidden/ignored entirely.  An empty expression list allows everything.
 //   • blacklist: filtered out when it matches any expression
 //   • whitelist: filtered out when it matches no expression
-bool Wsl2IpFwdService::IsPortFilteredOut(uint16_t port) const {
-    if (config_.port_filter_expressions.empty()) return false;
+bool Wsl2IpFwdService::IsPortFilteredOut(uint16_t port, const std::string& distro) const {
+    // Effective filter set for this distro = its distro-scoped entries plus all
+    // general (untagged) entries. An entry with no parallel distro tag is general.
     bool matches = false;
-    for (auto& expr : config_.port_filter_expressions)
-        if (MatchesExpression(port, expr)) { matches = true; break; }
+    bool anyApplicable = false;
+    const auto& exprs   = config_.port_filter_expressions;
+    const auto& distros = config_.port_filter_distros;
+    for (size_t i = 0; i < exprs.size(); ++i) {
+        const std::string& scope = (i < distros.size()) ? distros[i] : std::string{};
+        if (!scope.empty() && scope != distro) continue;  // scoped to a different distro
+        anyApplicable = true;
+        if (MatchesExpression(port, exprs[i])) { matches = true; break; }
+    }
+    // No expressions apply to this distro → allow everything (mirrors the old
+    // "empty list allows everything" behavior, per-distro).
+    if (!anyApplicable) return false;
     return config_.port_filter_whitelist ? !matches : matches;
 }
 
@@ -282,201 +285,231 @@ void Wsl2IpFwdService::RefreshUserToken() {
     monitor_.SetUserToken(hPrimary);
 }
 
+void Wsl2IpFwdService::MigrateConfig() {
+    if (config_.config_version >= CURRENT_CONFIG_VERSION) return;
+
+    // Which distro do the legacy flat ports belong to? The previously-configured
+    // distro, or (if none) the resolved default distro.
+    std::string target = config_.wsl_distro;
+    if (target.empty()) target = monitor_.DefaultDistro();
+
+    // Have legacy ports but can't resolve a distro yet (WSL down) — retry later.
+    if (!config_.ports.empty() && target.empty()) return;
+
+    if (!config_.ports.empty()) {
+        config_.distro_ports[target] = config_.ports;
+        config_.ports.clear();
+    }
+    if (config_.wsl_distros.empty() && !target.empty())
+        config_.wsl_distros = { target };
+
+    config_.config_version = CURRENT_CONFIG_VERSION;
+    Config::Save(config_);
+    Log("Migrated config to v" + std::to_string(CURRENT_CONFIG_VERSION) +
+        (target.empty() ? "" : (" (legacy ports -> distro \"" + target + "\")")));
+}
+
+void Wsl2IpFwdService::RefreshMonitoredDistros() {
+    std::vector<std::string> running = monitor_.RunningDistros();
+    std::vector<std::string> next;
+    for (auto& d : running) {
+        if (config_.wsl_distros.empty() ||
+            std::find(config_.wsl_distros.begin(), config_.wsl_distros.end(), d)
+                != config_.wsl_distros.end())
+            next.push_back(d);
+    }
+    // Tear down rules for distros we previously monitored but no longer do.
+    for (auto& d : monitoredDistros_)
+        if (std::find(next.begin(), next.end(), d) == next.end()) {
+            RemoveDistroRules(d);
+            distroIps_.erase(d);
+            detectedPorts_.erase(d);
+        }
+    monitoredDistros_ = next;
+}
+
+void Wsl2IpFwdService::ProcessDistro(const std::string& distro) {
+    int effLog = interactive_ ? (trace_ ? 2 : 1) : 0;
+    if (config_.log_level > effLog) effLog = config_.log_level;
+
+    std::string wslIp = monitor_.GetWslIp(distro);
+    if (wslIp.empty()) {
+        if (effLog >= 1 && !lastLoggedIp_[distro].empty()) {
+            Log("[" + distro + "] not running.");
+            lastLoggedIp_[distro].clear();
+            lastPollPorts_[distro].clear();
+        }
+        RemoveDistroRules(distro);
+        distroIps_.erase(distro);
+        detectedPorts_.erase(distro);
+        return;
+    }
+    distroIps_[distro] = wslIp;
+
+    // Networking mode comes from .wslconfig (global to WSL2); the IP heuristic
+    // fallback uses this distro's IP.
+    RefreshNetMode(wslIp);
+    NetMode mode = static_cast<NetMode>(netMode_.load());
+
+    auto ports = monitor_.GetListeningPorts(distro);
+    detectedPorts_[distro] = ports;   // cache for list_ports
+
+    if (effLog >= 1) {
+        std::set<uint16_t> cur;
+        for (auto& p : ports) cur.insert(p.port);
+        if (effLog >= 2) {
+            std::string list;
+            for (auto& p : ports) list += std::to_string(p.port) + "/" + p.protocol + " ";
+            Log("[" + distro + "] poll IP=" + wslIp + " ports: " + (list.empty() ? "(none)" : list));
+        } else {
+            if (wslIp != lastLoggedIp_[distro]) {
+                Log("[" + distro + "] IP: " + wslIp);
+                lastPollPorts_[distro].clear();
+            }
+            for (auto& p : ports)
+                if (!lastPollPorts_[distro].count(p.port))
+                    Log("[" + distro + "] port appeared: " + std::to_string(p.port) + "/" + p.protocol);
+            for (auto prev : lastPollPorts_[distro])
+                if (!cur.count(prev))
+                    Log("[" + distro + "] port gone: " + std::to_string(prev));
+        }
+        lastPollPorts_[distro] = cur;
+        lastLoggedIp_[distro]  = wslIp;
+    }
+
+    if (mode == NetMode::VirtioProxy) { RemoveDistroRules(distro); return; }
+
+    auto  now    = std::chrono::steady_clock::now();
+    auto& active = activePorts_[distro];
+    auto& seen   = seenPorts_[distro];
+    auto& dports = config_.distro_ports[distro];
+
+    for (auto& p : ports) active[p.port].lastSeen = now;
+
+    // New-port detection (auto-forward / notify), filtered by whitelist/blacklist.
+    for (auto& p : ports) {
+        uint16_t port = p.port;
+        if (IsPortFilteredOut(port, distro)) continue;
+        if (seen.count(port)) continue;
+        if (dports.count(port)) { seen.insert(port); continue; }
+        seen.insert(port);
+
+        // Two-pass match: a rule scoped to this distro takes precedence over a
+        // general (untagged) rule. Pass 0 = distro-scoped only, pass 1 = general.
+        bool     autoForward = false;
+        uint16_t mappedLocal = 0;
+        for (int pass = 0; pass < 2 && !autoForward; ++pass) {
+            for (size_t i = 0; i < config_.auto_forward_expressions.size(); ++i) {
+                const std::string& scope = (i < config_.auto_forward_distros.size())
+                                           ? config_.auto_forward_distros[i] : std::string{};
+                bool isScoped = !scope.empty();
+                if (pass == 0 && (!isScoped || scope != distro)) continue;  // this distro only
+                if (pass == 1 && isScoped) continue;                        // general only
+                if (MatchesExpression(port, config_.auto_forward_expressions[i])) {
+                    autoForward = true;
+                    const std::string le = (i < config_.auto_forward_local_expressions.size())
+                                           ? config_.auto_forward_local_expressions[i] : std::string{};
+                    mappedLocal = MappedLocalPort(port, config_.auto_forward_expressions[i], le);
+                    break;
+                }
+            }
+        }
+
+        if (autoForward) {
+            PortConfig af;
+            af.enabled    = true;
+            af.local_port = mappedLocal;
+            af.fw_public  = config_.auto_forward_fw_public;
+            af.fw_private = config_.auto_forward_fw_private;
+            af.fw_domain  = config_.auto_forward_fw_domain;
+            dports[port]  = af;
+            Config::Save(config_);
+            std::string via = mappedLocal ? (" (local " + std::to_string(mappedLocal) + ")") : "";
+            Log("[" + distro + "] port " + std::to_string(port) + via + " auto-forwarded.");
+        } else if (config_.notify_new_ports) {
+            bool suppress = false;
+            if (config_.ignore_system_ports && port < 1024) suppress = true;
+            if (!suppress)
+                for (auto ig : config_.notify_ignore_ports)
+                    if (ig == port) { suppress = true; break; }
+            if (!suppress && !config_.notify_while_gui_active && ipcServer_.ActiveClientCount() > 0)
+                suppress = true;
+
+            dports[port] = PortConfig{};
+            Config::Save(config_);
+            Log("[" + distro + "] new port " + std::to_string(port) + " added (disabled).");
+            if (!suppress) NotifyUser(port);
+        }
+    }
+
+    // Process configured ports for this distro.
+    for (auto& [port, cfg] : dports) {
+        if (IsPortFilteredOut(port, distro) || !cfg.enabled) {
+            if (active.count(port) && active[port].forwarded) RemovePort(distro, port);
+            continue;
+        }
+        bool detected = std::any_of(ports.begin(), ports.end(),
+            [port = port](const WslPortInfo& p) { return p.port == port; });
+        if (detected) ApplyPort(distro, port, wslIp, cfg);
+    }
+
+    // Offline threshold for this distro.
+    for (auto& [port, ap] : active) {
+        if (!ap.forwarded) continue;
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - ap.lastSeen).count();
+        if (elapsed > config_.offline_threshold_ms) {
+            Log("[" + distro + "] port " + std::to_string(port) + " offline — removing rules.");
+            RemovePort(distro, port);
+        }
+    }
+}
+
+void Wsl2IpFwdService::PublishUpnpDesired() {
+    std::map<uint16_t, UpnpMapping> desired;
+    for (auto& [distro, dports] : config_.distro_ports) {
+        auto ai = activePorts_.find(distro);
+        if (ai == activePorts_.end()) continue;
+        for (auto& [port, cfg] : dports) {
+            if (!cfg.enabled || !cfg.upnp_enabled) continue;
+            auto pit = ai->second.find(port);
+            if (pit == ai->second.end() || !pit->second.forwarded) continue;
+            uint16_t localPort = EffectiveLocalPort(port, cfg);
+            uint16_t extPort   = cfg.upnp_remote_port ? cfg.upnp_remote_port : localPort;
+            desired[extPort] = UpnpMapping{ localPort,
+                "WSL2 IP Forwarder " + distro + " port " + std::to_string(port) };
+        }
+    }
+    upnp_.SetDesired(std::move(desired));
+}
+
 void Wsl2IpFwdService::MonitorLoop() {
     while (running_) {
         RefreshUserToken();
 
-        // Reload config each cycle so GUI changes take effect without restart
+        // Reload config each cycle so GUI changes take effect without restart.
         config_ = Config::Load();
-        monitor_.SetDistro(config_.wsl_distro);
+        MigrateConfig();
 
-        // Effective log level: --debug/--trace flags take precedence over config,
-        // but the config setting also applies when running as a service daemon.
-        int effLog = interactive_ ? (trace_ ? 2 : 1) : 0;
-        if (config_.log_level > effLog) effLog = config_.log_level;
-
-        std::string wslIp = monitor_.GetWslIp();
-        if (!wslIp.empty()) {
-            currentWslIp_ = wslIp;
-
-            // Determine networking mode from .wslconfig (IP heuristic fallback).
-            RefreshNetMode(wslIp);
-            NetMode mode = static_cast<NetMode>(netMode_.load());
-
-            auto ports = monitor_.GetListeningPorts();
-
-            if (effLog >= 1) {
-                // Build current port set for change detection (levels 1 and 2).
-                std::set<uint16_t> currentPorts;
-                for (auto& p : ports) currentPorts.insert(p.port);
-
-                if (effLog >= 2) {
-                    // Trace: log every poll cycle.
-                    std::string portList;
-                    for (auto& p : ports)
-                        portList += std::to_string(p.port) + "/" + p.protocol + " ";
-                    Log("Poll: WSL IP=" + wslIp + "  detected ports: " +
-                        (portList.empty() ? "(none)" : portList));
-                } else {
-                    // Debug: log only when something changed.
-                    if (wslIp != lastLoggedWslIp_) {
-                        Log("WSL IP: " + wslIp);
-                        lastLoggedWslIp_ = wslIp;
-                        // IP change → reset so current ports are re-reported.
-                        lastPollPorts_.clear();
-                    }
-                    for (auto& p : ports)
-                        if (!lastPollPorts_.count(p.port))
-                            Log("Port appeared: " + std::to_string(p.port) + "/" + p.protocol);
-                    for (auto prev : lastPollPorts_)
-                        if (!currentPorts.count(prev))
-                            Log("Port gone:     " + std::to_string(prev));
-                }
-                lastPollPorts_ = currentPorts;
-                lastLoggedWslIp_ = wslIp;
-            }
-
-            if (mode == NetMode::VirtioProxy) {
-                // VirtioProxy can't expose WSL2 to the LAN — do nothing, and tear
-                // down anything we previously created so no stale/broken rules linger.
-                RemoveAllRules();
-            } else {
-
-            auto now = std::chrono::steady_clock::now();
-            for (auto& p : ports)
-                activePorts_[p.port].lastSeen = now;
-
-            // Check for newly-detected ports — auto-forward and/or notify.
-            for (auto& p : ports) {
-                uint16_t port = p.port;
-
-                // Filter gate: a filtered-out port (blacklisted, or not in the
-                // whitelist) is treated as if it does not exist — no auto-forward,
-                // no notification, no config entry.  Not marked seen, so it is
-                // re-evaluated automatically if the filter later allows it.
-                if (IsPortFilteredOut(port)) continue;
-
-                if (seenPorts_.count(port)) continue;
-                if (config_.ports.count(port)) {
-                    seenPorts_.insert(port);
-                    continue;
-                }
-                seenPorts_.insert(port);
-
-                // Auto-forward: if the port matches any configured expression,
-                // add it immediately with forwarding enabled (no notification).
-                // The index-aligned local expression (if any) maps it to a custom
-                // local port.
-                bool     autoForward = false;
-                uint16_t mappedLocal = 0;   // 0 = same port
-                for (size_t i = 0; i < config_.auto_forward_expressions.size(); ++i) {
-                    if (MatchesExpression(port, config_.auto_forward_expressions[i])) {
-                        autoForward = true;
-                        const std::string localExpr =
-                            (i < config_.auto_forward_local_expressions.size())
-                                ? config_.auto_forward_local_expressions[i] : std::string{};
-                        mappedLocal = MappedLocalPort(port, config_.auto_forward_expressions[i], localExpr);
-                        break;
-                    }
-                }
-
-                if (autoForward) {
-                    PortConfig afCfg;
-                    afCfg.enabled    = true;
-                    afCfg.local_port = mappedLocal;
-                    afCfg.fw_public  = config_.auto_forward_fw_public;
-                    afCfg.fw_private = config_.auto_forward_fw_private;
-                    afCfg.fw_domain  = config_.auto_forward_fw_domain;
-                    config_.ports[port] = afCfg;
-                    Config::Save(config_);
-                    std::string via = mappedLocal ? (" (local " + std::to_string(mappedLocal) + ")") : "";
-                    Log("Port " + std::to_string(port) + via + " auto-forwarded (matched expression).");
-                } else if (config_.notify_new_ports) {
-                    // Not auto-forwarded — decide whether to show a notification.
-                    // (Filter suppression already handled by the gate above.)
-                    bool suppress = false;
-                    if (config_.ignore_system_ports && port < 1024) suppress = true;
-                    if (!suppress) {
-                        for (auto ig : config_.notify_ignore_ports)
-                            if (ig == port) { suppress = true; break; }
-                    }
-
-                    // Suppress balloon if user opted out while GUI is connected
-                    if (!suppress && !config_.notify_while_gui_active
-                            && ipcServer_.ActiveClientCount() > 0)
-                        suppress = true;
-
-                    config_.ports[port] = PortConfig{};
-                    Config::Save(config_);
-                    Log("New port " + std::to_string(port) + " added to config (disabled).");
-                    if (!suppress) {
-                        Log("Showing notification for new port " + std::to_string(port) + ".");
-                        NotifyUser(port);
-                    }
-                }
-            }
-
-            // Process configured ports
-            for (auto& [port, cfg] : config_.ports) {
-                // Safety net: never forward a filtered-out port even if it
-                // somehow remains in config (e.g. config edited on disk).
-                if (IsPortFilteredOut(port)) {
-                    if (activePorts_.count(port) && activePorts_[port].forwarded)
-                        RemovePort(port);
-                    continue;
-                }
-                if (!cfg.enabled) {
-                    if (activePorts_.count(port) && activePorts_[port].forwarded)
-                        RemovePort(port);
-                    continue;
-                }
-                bool detected = std::any_of(ports.begin(), ports.end(),
-                    [port = port](const WslPortInfo& p) { return p.port == port; });
-                if (detected)
-                    ApplyPort(port, wslIp, cfg);
-            }
-
-            // Offline threshold
-            for (auto it = activePorts_.begin(); it != activePorts_.end(); ) {
-                if (!it->second.forwarded) { ++it; continue; }
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - it->second.lastSeen).count();
-                if (elapsed > config_.offline_threshold_ms) {
-                    Log("Port " + std::to_string(it->first) + " offline threshold exceeded — removing rules.");
-                    RemovePort(it->first);
-                }
-                ++it;
-            }
-
-            } // end (mode != VirtioProxy)
-        } else {
-            currentWslIp_.clear();
-            // Log the offline transition once (debug/trace). The empty-IP guard
-            // means it fires only on the first poll after WSL goes away.
-            if (effLog >= 1 && !lastLoggedWslIp_.empty()) {
-                Log("WSL not running.");
-                lastLoggedWslIp_.clear();
-                lastPollPorts_.clear();
-            }
+        // Recompute the monitored-distro set once per full poll interval.
+        auto now = std::chrono::steady_clock::now();
+        bool fullCycle = monitoredDistros_.empty() ||
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDistroEnum_).count()
+                >= config_.poll_interval_ms;
+        if (fullCycle) {
+            RefreshMonitoredDistros();
+            lastDistroEnum_ = now;
+            distroIndex_    = 0;
         }
 
-        // ---- UPnP desired-state -------------------------------------------------
-        // Declare a router mapping for every enabled port that opted in to UPnP
-        // and is currently being forwarded.  The UpnpManager reconciles this on
-        // its own thread, so a slow/absent IGD never stalls the monitor loop.
-        {
-            std::map<uint16_t, UpnpMapping> desiredUpnp;
-            for (auto& [port, cfg] : config_.ports) {
-                if (!cfg.enabled || !cfg.upnp_enabled) continue;
-                auto ait = activePorts_.find(port);
-                if (ait == activePorts_.end() || !ait->second.forwarded) continue;
-                uint16_t localPort = EffectiveLocalPort(port, cfg);
-                uint16_t extPort   = cfg.upnp_remote_port ? cfg.upnp_remote_port : localPort;
-                desiredUpnp[extPort] = UpnpMapping{ localPort,
-                    "WSL2 IP Forwarder port " + std::to_string(port) };
-            }
-            upnp_.SetDesired(std::move(desiredUpnp));
+        // Process exactly one distro this tick (staggered across the interval).
+        if (!monitoredDistros_.empty()) {
+            if (distroIndex_ >= monitoredDistros_.size()) distroIndex_ = 0;
+            ProcessDistro(monitoredDistros_[distroIndex_]);
+            ++distroIndex_;
         }
+
+        // UPnP desired-state, rebuilt from all distros' active ports.
+        PublishUpnpDesired();
 
         // ---- Update check -------------------------------------------------------
         {
@@ -514,7 +547,10 @@ void Wsl2IpFwdService::MonitorLoop() {
             }
         }
 
-        DWORD wait = static_cast<DWORD>(std::max(1000, config_.poll_interval_ms));
+        // Stagger: with N monitored distros, query one every poll_interval / N so
+        // each distro is still polled once per interval. Floor at 500 ms.
+        int n = monitoredDistros_.empty() ? 1 : static_cast<int>(monitoredDistros_.size());
+        DWORD wait = static_cast<DWORD>(std::max(500, config_.poll_interval_ms / n));
         if (WaitForSingleObject(stopEvent_, wait) == WAIT_OBJECT_0) break;
     }
 }
@@ -609,36 +645,51 @@ void Wsl2IpFwdService::RefreshNetMode(const std::string& wslIp) {
     }
 }
 
-void Wsl2IpFwdService::ApplyPort(uint16_t port, const std::string& wslIp, const PortConfig& cfg) {
-    auto& ap = activePorts_[port];
+void Wsl2IpFwdService::ApplyPort(const std::string& distro, uint16_t port,
+                                 const std::string& wslIp, const PortConfig& cfg) {
+    auto& ap = activePorts_[distro][port];
 
     // Effective local (listen) port: 0 in config means "same as the WSL port";
     // mirrored mode forces the WSL port (custom local ports don't work there).
     uint16_t listenPort = EffectiveLocalPort(port, cfg);
 
-    // If the local port was changed in config, tear down the rules created on the
-    // old listen port before rebuilding on the new one.
+    // If the local port changed, tear down the old rules before rebuilding —
+    // but only the OS rule if no other distro still uses that old listen port.
     if (ap.localPort != 0 && ap.localPort != listenPort) {
-        if (ap.forwarded) { forwarder_.RemoveRule(ap.localPort, config_.listen_address); ap.forwarded = false; }
-        if (ap.fwRule)    { firewall_.RemoveRule(ap.localPort);                           ap.fwRule    = false; }
-        Log("Local port for " + std::to_string(port) + " changed to "
+        if (ap.forwarded) {
+            if (!ListenPortForwardedByOther(distro, ap.localPort))
+                forwarder_.RemoveRule(ap.localPort, config_.listen_address);
+            ap.forwarded = false;
+        }
+        if (ap.fwRule) {
+            if (!ListenPortFirewalledByOther(distro, ap.localPort))
+                firewall_.RemoveRule(ap.localPort);
+            ap.fwRule = false;
+        }
+        Log("[" + distro + "] local port for " + std::to_string(port) + " changed to "
             + std::to_string(listenPort) + " — rebuilding rules.");
     }
 
     if (!ap.forwarded || ap.wslIp != wslIp) {
-        if (ap.forwarded && ap.wslIp != wslIp)
-            forwarder_.RemoveRule(listenPort, config_.listen_address);
-
+        // No explicit remove on a WSL-IP change: `netsh portproxy add` overwrites
+        // the existing entry atomically, avoiding a gap on a shared listen port.
         if (forwarder_.AddRule(listenPort, port, wslIp, config_.listen_address)) {
             ap.forwarded = true;
             ap.wslIp     = wslIp;
             ap.localPort = listenPort;
             std::string via = (listenPort == port) ? "" : (" (local " + std::to_string(listenPort) + ")");
-            Log("Added portproxy rule for port " + std::to_string(port) + via + " -> " + wslIp);
+            Log("[" + distro + "] portproxy " + std::to_string(port) + via + " -> " + wslIp);
+        } else {
+            // Likely a host listen-port collision with another distro (best-effort
+            // until per-distro local ports). Leave forwarded=false.
+            Log("[" + distro + "] could not add portproxy on listen port "
+                + std::to_string(listenPort) + " (in use by another distro?).");
         }
     }
 
-    if (!ap.fwRule) {
+    // Only open the firewall once forwarding is actually established, so a port
+    // that lost a host-port collision doesn't create/clobber a shared rule.
+    if (ap.forwarded && !ap.fwRule) {
         long profiles = 0;
         if (cfg.fw_domain)  profiles |= FW_DOMAIN;
         if (cfg.fw_private) profiles |= FW_PRIVATE;
@@ -646,32 +697,72 @@ void Wsl2IpFwdService::ApplyPort(uint16_t port, const std::string& wslIp, const 
         if (profiles && firewall_.AddRule(listenPort, profiles)) {
             ap.fwRule    = true;
             ap.localPort = listenPort;
-            Log("Added firewall rule for port " + std::to_string(listenPort));
+            Log("[" + distro + "] firewall rule for port " + std::to_string(listenPort));
         }
     }
 }
 
-void Wsl2IpFwdService::RemovePort(uint16_t port) {
-    auto it = activePorts_.find(port);
-    if (it == activePorts_.end()) return;
-    // Rules live on the listen port the rules were created with (falls back to
-    // the WSL port for legacy entries created before custom local ports).
+bool Wsl2IpFwdService::ListenPortForwardedByOther(const std::string& distro,
+                                                  uint16_t listenPort) const {
+    for (auto& [d, ports] : activePorts_) {
+        if (d == distro) continue;
+        for (auto& [p, ap] : ports)
+            if (ap.forwarded && ap.localPort == listenPort) return true;
+    }
+    return false;
+}
+
+bool Wsl2IpFwdService::ListenPortFirewalledByOther(const std::string& distro,
+                                                   uint16_t listenPort) const {
+    for (auto& [d, ports] : activePorts_) {
+        if (d == distro) continue;
+        for (auto& [p, ap] : ports)
+            if (ap.fwRule && ap.localPort == listenPort) return true;
+    }
+    return false;
+}
+
+void Wsl2IpFwdService::RemovePort(const std::string& distro, uint16_t port) {
+    auto dit = activePorts_.find(distro);
+    if (dit == activePorts_.end()) return;
+    auto it = dit->second.find(port);
+    if (it == dit->second.end()) return;
     uint16_t listenPort = it->second.localPort ? it->second.localPort : port;
     if (it->second.forwarded) {
-        forwarder_.RemoveRule(listenPort, config_.listen_address);
+        // Only tear down the shared OS rule if no other distro still uses it
+        // (handoff between distros on the same listen port).
+        if (!ListenPortForwardedByOther(distro, listenPort)) {
+            forwarder_.RemoveRule(listenPort, config_.listen_address);
+            Log("[" + distro + "] removed portproxy on port " + std::to_string(listenPort));
+        } else {
+            Log("[" + distro + "] released portproxy on port " + std::to_string(listenPort)
+                + " (still in use by another distribution).");
+        }
         it->second.forwarded = false;
-        Log("Removed portproxy rule for port " + std::to_string(listenPort));
     }
     if (it->second.fwRule) {
-        firewall_.RemoveRule(listenPort);
+        if (!ListenPortFirewalledByOther(distro, listenPort)) {
+            firewall_.RemoveRule(listenPort);
+            Log("[" + distro + "] removed firewall rule on port " + std::to_string(listenPort));
+        }
         it->second.fwRule = false;
-        Log("Removed firewall rule for port " + std::to_string(listenPort));
     }
 }
 
+void Wsl2IpFwdService::RemoveDistroRules(const std::string& distro) {
+    auto dit = activePorts_.find(distro);
+    if (dit == activePorts_.end()) return;
+    std::vector<uint16_t> ports;
+    for (auto& [port, _] : dit->second) ports.push_back(port);
+    for (uint16_t p : ports) RemovePort(distro, p);
+}
+
 void Wsl2IpFwdService::RemoveAllRules() {
-    for (auto& [port, ap] : activePorts_)
-        RemovePort(port);
+    for (auto& [distro, ports] : activePorts_) {
+        std::vector<uint16_t> ps;
+        for (auto& [port, _] : ports) ps.push_back(port);
+        for (uint16_t p : ps) RemovePort(distro, p);
+    }
 }
 
 // ---- IPC request handler ---------------------------------------------------
@@ -686,45 +777,65 @@ std::string Wsl2IpFwdService::HandleRequest(const std::string& body) {
 
         if (cmd == proto::CMD_LIST_PORTS) {
             json arr = json::array();
-            auto detected = monitor_.GetListeningPorts();
-            std::map<uint16_t, bool> allPorts;
-            for (auto& p : detected)  allPorts[p.port] = true;
-            for (auto& [p, _] : config_.ports) allPorts[p] = false;
-            for (auto& [p, _] : activePorts_)  allPorts[p] = false;
-
             auto now = std::chrono::steady_clock::now();
             auto upnpActive = upnp_.ActiveExternalPorts();  // live router-mapping snapshot
-            for (auto& [port, _] : allPorts) {
-                json e;
-                e["port"]     = port;
-                e["protocol"] = "tcp";
-                bool det = std::any_of(detected.begin(), detected.end(),
-                    [port=port](const WslPortInfo& x){ return x.port == port; });
-                e["detected"] = det;
-                auto ait = activePorts_.find(port);
-                e["forwarded"]       = ait != activePorts_.end() && ait->second.forwarded;
-                e["firewall_active"] = ait != activePorts_.end() && ait->second.fwRule;
-                if (ait != activePorts_.end()) {
-                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - ait->second.lastSeen).count();
-                    e["last_seen_ms"] = ms;
-                } else {
-                    e["last_seen_ms"] = -1;
-                }
-                auto cit = config_.ports.find(port);
-                const PortConfig pc = cit != config_.ports.end() ? cit->second : PortConfig{};
-                e["config"] = pc;
 
-                // Whether this port's UPnP mapping is actually present on the router.
-                bool upnpActiveFlag = false;
-                if (pc.upnp_enabled) {
-                    uint16_t effLocal = EffectiveLocalPort(port, pc);
-                    uint16_t effExt   = pc.upnp_remote_port ? pc.upnp_remote_port : effLocal;
-                    upnpActiveFlag = upnpActive.count(effExt) > 0;
-                }
-                e["upnp_active"] = upnpActiveFlag;
+            // Union of distros known from detection, config, or active state.
+            std::set<std::string> distros;
+            for (auto& [d, _] : detectedPorts_)       distros.insert(d);
+            for (auto& [d, _] : config_.distro_ports) distros.insert(d);
+            for (auto& [d, _] : activePorts_)         distros.insert(d);
 
-                arr.push_back(e);
+            for (const std::string& distro : distros) {
+                const auto* det    = detectedPorts_.count(distro) ? &detectedPorts_.at(distro)   : nullptr;
+                const auto* dports = config_.distro_ports.count(distro) ? &config_.distro_ports.at(distro) : nullptr;
+                const auto* active = activePorts_.count(distro) ? &activePorts_.at(distro)       : nullptr;
+
+                std::set<uint16_t> ports;
+                if (det)    for (auto& p : *det)    ports.insert(p.port);
+                if (dports) for (auto& [p, _] : *dports) ports.insert(p);
+                if (active) for (auto& [p, _] : *active) ports.insert(p);
+
+                for (uint16_t port : ports) {
+                    json e;
+                    e["distro"]   = distro;
+                    e["port"]     = port;
+                    e["protocol"] = "tcp";
+                    bool detFlag = det && std::any_of(det->begin(), det->end(),
+                        [port](const WslPortInfo& x){ return x.port == port; });
+                    e["detected"] = detFlag;
+
+                    const ActivePort* ap = nullptr;
+                    if (active) { auto it = active->find(port); if (it != active->end()) ap = &it->second; }
+                    e["forwarded"]       = ap && ap->forwarded;
+                    e["firewall_active"] = ap && ap->fwRule;
+                    e["last_seen_ms"]    = ap ? (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                    now - ap->lastSeen).count() : -1;
+
+                    PortConfig pc;
+                    if (dports) { auto it = dports->find(port); if (it != dports->end()) pc = it->second; }
+                    e["config"] = pc;
+
+                    bool upnpActiveFlag = false;
+                    if (pc.upnp_enabled) {
+                        uint16_t effLocal = EffectiveLocalPort(port, pc);
+                        uint16_t effExt   = pc.upnp_remote_port ? pc.upnp_remote_port : effLocal;
+                        upnpActiveFlag = upnpActive.count(effExt) > 0;
+                    }
+                    e["upnp_active"] = upnpActiveFlag;
+                    arr.push_back(e);
+                }
+            }
+            res = {{"id", id}, {"ok", true}, {"data", arr}};
+
+        } else if (cmd == proto::CMD_LIST_DISTROS) {
+            json arr = json::array();
+            for (auto& d : monitor_.ListDistros()) {
+                bool enabled = config_.wsl_distros.empty() ||
+                    std::find(config_.wsl_distros.begin(), config_.wsl_distros.end(), d.name)
+                        != config_.wsl_distros.end();
+                arr.push_back({{"name", d.name}, {"running", d.running},
+                               {"default", d.isDefault}, {"enabled", enabled}});
             }
             res = {{"id", id}, {"ok", true}, {"data", arr}};
 
@@ -733,52 +844,60 @@ std::string Wsl2IpFwdService::HandleRequest(const std::string& body) {
 
         } else if (cmd == proto::CMD_SET_CONFIG) {
             GlobalConfig newCfg = req.at("data").get<GlobalConfig>();
-            // Preserve per-port configs absent from the GUI payload
-            for (auto& [p, c] : config_.ports)
-                if (!newCfg.ports.count(p)) newCfg.ports[p] = c;
-            // Preserve service-managed update state (never overwritten by GUI)
+            // Preserve service-managed state the GUI doesn't send.
+            newCfg.distro_ports           = config_.distro_ports;
+            newCfg.config_version         = config_.config_version;
             newCfg.pending_update_version = config_.pending_update_version;
             newCfg.pending_update_url     = config_.pending_update_url;
             newCfg.update_last_check_utc  = config_.update_last_check_utc;
             config_ = newCfg;
 
             // Prune ports the (possibly updated) whitelist/blacklist now filters
-            // out: tear down their rules, drop them from config, and forget them
-            // so they are re-evaluated cleanly if the filter later allows them.
-            std::vector<uint16_t> filteredOut;
-            for (auto& [port, _] : config_.ports)
-                if (IsPortFilteredOut(port)) filteredOut.push_back(port);
-            for (uint16_t port : filteredOut) {
-                RemovePort(port);
-                config_.ports.erase(port);
-                activePorts_.erase(port);
-                seenPorts_.erase(port);
-                Log("Port " + std::to_string(port) +
-                    " removed from config (filtered out by updated whitelist/blacklist).");
+            // out, across all distros.
+            for (auto& [distro, dports] : config_.distro_ports) {
+                std::vector<uint16_t> filteredOut;
+                for (auto& [port, _] : dports)
+                    if (IsPortFilteredOut(port, distro)) filteredOut.push_back(port);
+                for (uint16_t port : filteredOut) {
+                    RemovePort(distro, port);
+                    dports.erase(port);
+                    if (activePorts_.count(distro)) activePorts_[distro].erase(port);
+                    if (seenPorts_.count(distro))   seenPorts_[distro].erase(port);
+                    Log("[" + distro + "] port " + std::to_string(port) +
+                        " removed (filtered out by updated whitelist/blacklist).");
+                }
             }
 
             Config::Save(config_);
-            monitor_.SetDistro(config_.wsl_distro);
             res = {{"id", id}, {"ok", true}};
 
         } else if (cmd == proto::CMD_SET_PORT_CFG) {
+            std::string distro = req.value("distro", std::string{});
             uint16_t port = req.at("port").get<uint16_t>();
             PortConfig cfg = req.at("config").get<PortConfig>();
-            config_.ports[port] = cfg;
+            config_.distro_ports[distro][port] = cfg;
             Config::Save(config_);
-            if (!cfg.enabled) RemovePort(port);
-            seenPorts_.insert(port);
+            if (!cfg.enabled) RemovePort(distro, port);
+            seenPorts_[distro].insert(port);
             res = {{"id", id}, {"ok", true}};
 
         } else if (cmd == proto::CMD_GET_STATUS) {
             auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - startTime_).count();
+            // Summary across distros: first known IP, count of running distros,
+            // total active forwardings.
+            std::string anyIp;
+            for (auto& [d, ip] : distroIps_) { if (!ip.empty()) { anyIp = ip; break; } }
+            int forwardings = 0;
+            for (auto& [d, ports] : activePorts_)
+                for (auto& [p, ap] : ports) if (ap.forwarded) ++forwardings;
+
             json d;
-            d["wsl_ip"]            = currentWslIp_;
-            d["wsl_running"]       = !currentWslIp_.empty();
+            d["wsl_ip"]            = anyIp;
+            d["wsl_running"]       = !distroIps_.empty();
+            d["distro_count"]      = (int)distroIps_.size();
             d["service_uptime_s"]  = uptime;
-            d["active_forwardings"]= (int)std::count_if(activePorts_.begin(), activePorts_.end(),
-                [](const auto& p){ return p.second.forwarded; });
+            d["active_forwardings"]= forwardings;
             d["service_version"]   = WSL2IPFWD_VERSION;
             {
                 NetMode m = static_cast<NetMode>(netMode_.load());
@@ -790,15 +909,14 @@ std::string Wsl2IpFwdService::HandleRequest(const std::string& body) {
             res = {{"id", id}, {"ok", true}, {"data", d}};
 
         } else if (cmd == proto::CMD_REMOVE_PORT) {
+            std::string distro = req.value("distro", std::string{});
             uint16_t port = req.at("port").get<uint16_t>();
-            RemovePort(port);
-            config_.ports.erase(port);
-            activePorts_.erase(port);
-            // Forget the port entirely so a later detection is treated as brand
-            // new — re-running auto-forward and whitelist/blacklist evaluation.
-            seenPorts_.erase(port);
+            RemovePort(distro, port);
+            config_.distro_ports[distro].erase(port);
+            if (activePorts_.count(distro)) activePorts_[distro].erase(port);
+            if (seenPorts_.count(distro))   seenPorts_[distro].erase(port);
             Config::Save(config_);
-            Log("Removed port " + std::to_string(port) + " from config.");
+            Log("[" + distro + "] removed port " + std::to_string(port) + " from config.");
             res = {{"id", id}, {"ok", true}};
 
         } else if (cmd == proto::CMD_GET_UPDATE_INFO) {

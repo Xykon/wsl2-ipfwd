@@ -21,7 +21,8 @@ internal static class Protocol
     public const string CmdSetConfig  = "set_config";   // data: GlobalConfig → ok
     public const string CmdSetPortCfg = "set_port_cfg"; // port + config → ok
     public const string CmdGetStatus  = "get_status";   // → ServiceStatus
-    public const string CmdRemovePort     = "remove_port";       // port → ok
+    public const string CmdRemovePort     = "remove_port";       // distro + port → ok
     public const string CmdGetUpdateInfo  = "get_update_info";   // → UpdateInfo
     public const string CmdCheckUpdateNow = "check_update_now";  // trigger immediate check → ok
+    public const string CmdListDistros    = "list_distros";      // → DistroEntry[]
 }

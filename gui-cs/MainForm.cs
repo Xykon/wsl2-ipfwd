@@ -309,12 +309,14 @@ public partial class MainForm : Form
 
     private void RebuildPortList()
     {
-        // ---- Remember which port was selected so we can restore it -----------
-        // Keying on port number (int) means the selection survives even when
-        // the list order changes or a row is added above the current selection.
-        int? prevSelectedPort = null;
+        // ---- Remember which row was selected so we can restore it ------------
+        // Key on (distro, port) so the selection survives reordering.
+        string? prevSelectedKey = null;
         if (lvPorts.SelectedItems.Count > 0)
-            prevSelectedPort = ((PortEntry)lvPorts.SelectedItems[0].Tag!).Port;
+        {
+            var sp = (PortEntry)lvPorts.SelectedItems[0].Tag!;
+            prevSelectedKey = sp.Distro + "|" + sp.Port;
+        }
 
         lvPorts.BeginUpdate();
         lvPorts.Items.Clear();
@@ -330,7 +332,9 @@ public partial class MainForm : Form
             bool hasCustomLocal = !ignoreCustomLocal && p.Config.LocalPort > 0;
             int effectiveLocal  = hasCustomLocal ? p.Config.LocalPort : p.Port;
 
-            var item = new ListViewItem(p.Port.ToString());
+            // Column 0 = Distribution; then Port, Local Port, …
+            var item = new ListViewItem(p.Distro);
+            item.SubItems.Add(p.Port.ToString());
             // Local port: custom mapping if set (and honoured); otherwise the port
             // number itself while actively forwarded; a dash when not forwarded.
             string localPortText = hasCustomLocal ? p.Config.LocalPort.ToString()
@@ -373,11 +377,12 @@ public partial class MainForm : Form
         }
 
         // ---- Restore selection -----------------------------------------------
-        if (prevSelectedPort.HasValue)
+        if (prevSelectedKey != null)
         {
             foreach (ListViewItem item in lvPorts.Items)
             {
-                if (((PortEntry)item.Tag!).Port == prevSelectedPort.Value)
+                var pe = (PortEntry)item.Tag!;
+                if (pe.Distro + "|" + pe.Port == prevSelectedKey)
                 {
                     item.Selected = true;
                     item.Focused  = true;   // keep keyboard focus on the same row
@@ -439,7 +444,7 @@ public partial class MainForm : Form
         var p = (PortEntry)lvPorts.SelectedItems[0].Tag!;
 
         var answer = MessageBox.Show(
-            $"Remove all rules for port {p.Port}?\n\n" +
+            $"Remove all rules for port {p.Port} in {p.Distro}?\n\n" +
             "The port will be removed from the configuration and any active\n" +
             "port-proxy and firewall rules will be deleted.",
             "Confirm Remove", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
@@ -448,8 +453,9 @@ public partial class MainForm : Form
 
         var resp = await _ipc.SendAsync(new JsonObject
         {
-            ["cmd"]  = Protocol.CmdRemovePort,
-            ["port"] = p.Port
+            ["cmd"]    = Protocol.CmdRemovePort,
+            ["distro"] = p.Distro,
+            ["port"]   = p.Port
         });
 
         if (resp?["ok"]?.GetValue<bool>() == true)
@@ -475,7 +481,10 @@ public partial class MainForm : Form
 
         var cfg = JsonSerializer.Deserialize<GlobalConfig>(resp["data"]!.ToJsonString()) ?? new();
 
-        using var dlg = new SettingsDialog(cfg, _localSettings, CheckNowFromSettingsAsync);
+        // Fetch the distro list for the WSL2 tab's checkbox selector.
+        var distros = await ListDistrosAsync();
+
+        using var dlg = new SettingsDialog(cfg, _localSettings, distros, CheckNowFromSettingsAsync);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         // --- Service-side settings ---
@@ -545,8 +554,9 @@ public partial class MainForm : Form
         {
             var resp = await _ipc.SendAsync(new JsonObject
             {
-                ["cmd"]  = Protocol.CmdRemovePort,
-                ["port"] = p.Port
+                ["cmd"]    = Protocol.CmdRemovePort,
+                ["distro"] = p.Distro,
+                ["port"]   = p.Port
             });
             if (resp?["ok"]?.GetValue<bool>() != true) failed++;
         }
@@ -597,15 +607,16 @@ public partial class MainForm : Form
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         // Fire the IPC call and refresh (we're already on the UI thread)
-        _ = SavePortConfigAsync(port.Port, dlg.GetConfig());
+        _ = SavePortConfigAsync(port.Distro, port.Port, dlg.GetConfig());
     }
 
-    private async Task SavePortConfigAsync(int portNumber, PortConfig cfg)
+    private async Task SavePortConfigAsync(string distro, int portNumber, PortConfig cfg)
     {
         var cfgNode = JsonNode.Parse(JsonSerializer.Serialize(cfg))!;
         var resp = await _ipc.SendAsync(new JsonObject
         {
             ["cmd"]    = Protocol.CmdSetPortCfg,
+            ["distro"] = distro,
             ["port"]   = portNumber,
             ["config"] = cfgNode
         });
@@ -730,6 +741,16 @@ public partial class MainForm : Form
     /// (MonitorLoop wakes within poll_interval_ms ≤5s, HTTP timeout ≤8s),
     /// then returns the current update state.
     /// </summary>
+    /// <summary>Queries the service for installed distributions (for the settings UI).</summary>
+    private async Task<List<DistroEntry>> ListDistrosAsync()
+    {
+        if (!_ipc.IsConnected) return new();
+        var resp = await _ipc.SendAsync(new JsonObject { ["cmd"] = Protocol.CmdListDistros });
+        if (resp?["ok"]?.GetValue<bool>() == true && resp["data"] is JsonArray arr)
+            return JsonSerializer.Deserialize<List<DistroEntry>>(arr.ToJsonString()) ?? new();
+        return new();
+    }
+
     private async Task<UpdateInfo?> CheckNowFromSettingsAsync()
     {
         if (!_ipc.IsConnected)
@@ -1365,6 +1386,7 @@ public partial class MainForm : Form
         foreach (var node in arr)
         {
             if (node is not JsonObject obj) continue;
+            sb.Append(obj["distro"]);          sb.Append(',');
             sb.Append(obj["port"]);            sb.Append(',');
             sb.Append(obj["protocol"]);        sb.Append(',');
             sb.Append(obj["detected"]);        sb.Append(',');

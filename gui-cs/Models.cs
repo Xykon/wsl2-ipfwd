@@ -23,6 +23,7 @@ public class PortConfig
 /// <summary>One row in the list_ports response array.</summary>
 public class PortEntry
 {
+    [JsonPropertyName("distro")]          public string     Distro        { get; set; } = "";
     [JsonPropertyName("port")]            public int        Port          { get; set; }
     [JsonPropertyName("protocol")]        public string     Protocol      { get; set; } = "tcp";
     [JsonPropertyName("detected")]        public bool       Detected      { get; set; }
@@ -40,8 +41,10 @@ public class PortEntry
 /// </summary>
 public class GlobalConfig
 {
-    [JsonPropertyName("wsl_distro")]
-    public string WslDistro { get; set; } = "";
+    // Distributions to monitor (empty = all running). The service preserves the
+    // per-distro port map and config_version; the GUI only sends this list.
+    [JsonPropertyName("wsl_distros")]
+    public List<string> WslDistros { get; set; } = new();
 
     [JsonPropertyName("poll_interval_ms")]
     public int PollIntervalMs { get; set; } = 5000;
@@ -84,6 +87,11 @@ public class GlobalConfig
     [JsonPropertyName("auto_forward_local_expressions")]
     public List<string> AutoForwardLocalExpressions { get; set; } = new();
 
+    // Index-aligned with AutoForwardExpressions. Empty entry = all distributions.
+    // A distro-scoped rule takes precedence over a general (empty) rule.
+    [JsonPropertyName("auto_forward_distros")]
+    public List<string> AutoForwardDistros { get; set; } = new();
+
     [JsonPropertyName("auto_forward_fw_public")]
     public bool AutoForwardFwPublic { get; set; } = true;
 
@@ -100,6 +108,12 @@ public class GlobalConfig
 
     [JsonPropertyName("port_filter_expressions")]
     public List<string> PortFilterExpressions { get; set; } = new();
+
+    // Index-aligned with PortFilterExpressions. Empty entry = all distributions.
+    // The effective filter set for a distro is its scoped entries plus all
+    // general (empty) entries.
+    [JsonPropertyName("port_filter_distros")]
+    public List<string> PortFilterDistros { get; set; } = new();
 }
 
 /// <summary>A single port-filter entry stored in local (GUI-only) settings.</summary>
@@ -112,6 +126,11 @@ public class PortFilterEntry
     // Unused by port-filter rows.
     [JsonPropertyName("local_expression")]
     public string LocalExpression { get; set; } = "";
+
+    // Optional distribution scope ("" = all distributions). Used by both
+    // auto-forward and port-filter rows.
+    [JsonPropertyName("distro")]
+    public string Distro { get; set; } = "";
 
     [JsonPropertyName("comment")]
     public string Comment { get; set; } = "";
@@ -147,6 +166,15 @@ public class LocalSettings
     /// </summary>
     [JsonPropertyName("auto_forward_entries")]
     public List<PortFilterEntry> AutoForwardEntries { get; set; } = new();
+}
+
+/// <summary>One entry from the list_distros response.</summary>
+public class DistroEntry
+{
+    [JsonPropertyName("name")]    public string Name      { get; set; } = "";
+    [JsonPropertyName("running")] public bool   Running   { get; set; }
+    [JsonPropertyName("default")] public bool   IsDefault { get; set; }
+    [JsonPropertyName("enabled")] public bool   Enabled   { get; set; }
 }
 
 /// <summary>Update availability info returned by get_update_info.</summary>

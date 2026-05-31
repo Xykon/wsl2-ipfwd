@@ -67,6 +67,7 @@ on the toolbar) lets you start or install it — see
 
 | Column | Meaning |
 |--------|---------|
+| **Distribution** | The WSL2 distribution that **owns** the listening port (see note below) |
 | **Port** | The port number listening inside WSL2 |
 | **Local Port** | The Windows-side listen port. A custom value if remapped; the same number while actively forwarded; `—` when not forwarded |
 | **Protocol** | TCP or UDP |
@@ -75,6 +76,15 @@ on the toolbar) lets you start or install it — see
 | **Firewall** | ✓ = active Windows Firewall inbound rule exists |
 | **UPnP** | `—` if not enabled; otherwise the external router port with live status: **✓** = mapping present on the router, **…** = enabled but not yet mapped |
 | **Rule** | *Enabled* or *Disabled* — whether the port is configured for forwarding |
+
+> **How ports are attributed to a distribution:** All WSL2 distributions share a
+> single virtual machine and **one network namespace** (one IP), so a port can be
+> bound by only one distribution at a time and every distribution "sees" every
+> listening socket. The service identifies the real owner by running `ss -tlnp`
+> as root in each distribution and keeping only the sockets whose owning process
+> is visible there. Loopback-only binds (`127.0.0.0/8`, `::1`) are skipped — they
+> can't be reached from the Windows host. (Distributions without the `ss` tool
+> fall back to `/proc/net/tcp`, which can't attribute ownership.)
 
 ### Row colours
 
@@ -181,6 +191,11 @@ the moment they are detected in WSL2 — no per-port clicking.
   mirror the WSL2 Port structure: `80, 443` → `40080, 40443`, or
   `3000-4000` → `43000-44000`. A mismatched structure is flagged inline and
   blocks **Apply** until fixed. Leave blank to use the same port.
+- *(Optional)* The **Distribution** column scopes a rule to one distribution.
+  `(All)` applies to every distribution; a distro-specific rule **takes
+  precedence** over an `(All)` rule for the same port. This lets you, e.g.,
+  auto-forward `3000-4000` → `33000-34000` in *Ubuntu* and `3000-4000` →
+  `43000-44000` in *Debian* with two separate rules.
 - The **Public / Private / Domain** checkboxes set the firewall profiles applied
   to *all* auto-forwarded ports.
 
@@ -206,6 +221,12 @@ Choose a mode:
 An empty filter list shows everything regardless of mode. Each entry accepts a
 single port (`22`), a comma list (`22, 80, 443`), or a range
 (`32768-60999`), with an optional *Comment*.
+
+Each entry also has a **Distribution** column. `(All)` applies the entry to every
+distribution; a distro-specific entry applies only there. A distribution's
+effective filter set is its own scoped entries **plus** all `(All)` entries — so
+you can whitelist `80, 443` in *Debian* only while `3000-4000` is whitelisted
+everywhere. The whitelist/blacklist mode itself stays global.
 
 Because the filter is authoritative, changing it prunes any now-filtered ports
 from the service configuration (tearing down their rules). If a filter conflicts
@@ -251,8 +272,8 @@ Open **☰ Settings**. Changes are sent to the service when you click **Apply**.
 
 | Setting | Description |
 |---------|-------------|
-| **WSL2 distro** | Which distro to monitor. Blank = default distro. |
-| **Poll interval (ms)** | How often the service checks for port changes. Default 5 000. |
+| **Distributions to monitor** | Check the distributions to forward ports from. None checked = all running distributions. The service polls the selected running distros, staggering the queries across the poll interval. |
+| **Poll interval (ms)** | How often each distro is checked for port changes. Default 5 000. With N distros, one is queried every *interval ÷ N*. |
 | **Offline threshold (ms)** | How long without a response before WSL2 is considered offline. Default 30 000. |
 | **Listen address** | Windows-side address portproxy binds to. `0.0.0.0` = all interfaces; `127.0.0.1` = localhost only. |
 | **Service log level** | `Normal` (events only), `Debug` (log port changes), or `Trace` (log every poll). Written to `service.log`; applies within a few seconds. |

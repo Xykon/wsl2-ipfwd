@@ -41,7 +41,9 @@ public partial class PortConfigDialog : Form
 
     private void PopulateFields()
     {
-        this.Text        = $"Configure  Port {_port.Port}";
+        this.Text        = string.IsNullOrEmpty(_port.Distro)
+                         ? $"Configure  Port {_port.Port}"
+                         : $"Configure  {_port.Distro} : Port {_port.Port}";
         lblPort.Text     = _port.Port.ToString();
         lblProtocol.Text = _port.Protocol.ToUpperInvariant();
         lblDetected.Text = _port.Detected ? "Yes" : "No (not currently listening in WSL2)";

@@ -419,6 +419,17 @@ public partial class MainForm : Form
         lblUptime.Text        = "";
         tsslUpdated.Text      = $"Last attempt {DateTime.Now:HH:mm:ss}";
 
+        // The service is gone (stopped / not installed / unreachable) — the last
+        // known port list is stale, so clear it rather than showing ports as
+        // forwarded when nothing is actually running.
+        _lastStatus = null;
+        if (_ports.Count > 0)
+        {
+            _ports = [];
+            lvPorts.Items.Clear();
+            UpdateButtonState();
+        }
+
         // Update service-action button on disconnect (service may have stopped/uninstalled)
         if (_wasConnected) { _wasConnected = false; UpdateServiceButton(); }
     }
@@ -484,7 +495,8 @@ public partial class MainForm : Form
         // Fetch the distro list for the WSL2 tab's checkbox selector.
         var distros = await ListDistrosAsync();
 
-        using var dlg = new SettingsDialog(cfg, _localSettings, distros, CheckNowFromSettingsAsync);
+        using var dlg = new SettingsDialog(cfg, _localSettings, distros, CheckNowFromSettingsAsync,
+                                           _lastStatus?.LogDir);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         // --- Service-side settings ---

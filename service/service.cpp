@@ -922,6 +922,19 @@ std::string Wsl2IpFwdService::HandleRequest(const std::string& body) {
             for (auto& [d, ports] : activePorts_)
                 for (auto& [p, ap] : ports) if (ap.forwarded) ++forwardings;
 
+            // Convert the (wide) data directory to UTF-8 so the GUI can show the
+            // real log location — which depends on the SERVICE's portable/installed
+            // state, not the GUI's.
+            auto wideToUtf8 = [](const std::wstring& w) -> std::string {
+                if (w.empty()) return {};
+                int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
+                                            nullptr, 0, nullptr, nullptr);
+                std::string s(n, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
+                                    s.data(), n, nullptr, nullptr);
+                return s;
+            };
+
             json d;
             d["wsl_ip"]            = anyIp;
             d["wsl_running"]       = !distroIps_.empty();
@@ -929,6 +942,8 @@ std::string Wsl2IpFwdService::HandleRequest(const std::string& body) {
             d["service_uptime_s"]  = uptime;
             d["active_forwardings"]= forwardings;
             d["service_version"]   = WSL2IPFWD_VERSION;
+            d["log_dir"]           = wideToUtf8(apppaths::DataDir());
+            d["portable"]          = apppaths::IsPortable();
             {
                 NetMode m = static_cast<NetMode>(netMode_.load());
                 d["net_mode"]      = m == NetMode::VirtioProxy ? "virtioproxy"

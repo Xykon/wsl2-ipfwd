@@ -209,6 +209,11 @@ public class ServiceStatus
     // Version the service binary reports (compared against the GUI's own version).
     [JsonPropertyName("service_version")] public string ServiceVersion { get; set; } = "";
 
+    // Directory where the SERVICE writes service.log (depends on the service's
+    // own portable/installed state, which can differ from the GUI's).
+    [JsonPropertyName("log_dir")]  public string LogDir   { get; set; } = "";
+    [JsonPropertyName("portable")] public bool   Portable { get; set; }
+
     // WSL2 networking mode: "nat", "mirrored", or "virtioproxy".
     [JsonPropertyName("net_mode")] public string NetMode { get; set; } = "nat";
 

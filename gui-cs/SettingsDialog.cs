@@ -9,6 +9,7 @@ public partial class SettingsDialog : Form
     private readonly GlobalConfig  _origCfg;
     private readonly LocalSettings _origLocal;
     private readonly List<DistroEntry> _distros;
+    private readonly string _serviceLogDir;
 
     // Optional callback: when provided the "Check now" button performs an
     // inline async check and shows the result without closing the dialog.
@@ -93,11 +94,13 @@ public partial class SettingsDialog : Form
 
     public SettingsDialog(GlobalConfig config, LocalSettings local,
         List<DistroEntry> distros,
-        Func<Task<UpdateInfo?>>? checkForUpdateAsync = null)
+        Func<Task<UpdateInfo?>>? checkForUpdateAsync = null,
+        string? serviceLogDir = null)
     {
         _origCfg             = config;
         _origLocal           = local;
         _distros             = distros;
+        _serviceLogDir       = serviceLogDir ?? "";
         _checkForUpdateAsync = checkForUpdateAsync;
         InitializeComponent();
         PopulateFields();
@@ -131,6 +134,13 @@ public partial class SettingsDialog : Form
         numOffline.Value   = Math.Clamp(_origCfg.OfflineThresholdMs, (int)numOffline.Minimum, (int)numOffline.Maximum);
         txtListenAddr.Text = _origCfg.ListenAddress;
         cmbLogLevel.SelectedIndex = Math.Clamp(_origCfg.LogLevel, 0, cmbLogLevel.Items.Count - 1);
+        // Show the service's actual log location (its portable/installed state may
+        // differ from this GUI's), reported by the service in get_status.
+        string logLoc = string.IsNullOrEmpty(_serviceLogDir)
+            ? "the service's data directory"
+            : _serviceLogDir;
+        lblLogNote.Text = $"Written to service.log in {logLoc}.\n" +
+                          "Applies within a few seconds; restart the service to apply immediately.";
 
         // Distribution combo columns — populated from installed distros + (All).
         // Swallow combobox DataErrors (e.g. a saved distro no longer installed)

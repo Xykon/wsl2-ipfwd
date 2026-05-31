@@ -39,6 +39,7 @@ partial class MainForm
     private Label                lblUpdateText = null!;
     private Button               btnDownload   = null!;
     private Button               btnInstallNow = null!;
+    private Button               btnUpdateService = null!;  // shown on GUI/service version mismatch
     private Button               btnUpdateLater  = null!;
     private Panel                pnlUpdateRight  = null!;   // fixed-width button area inside pnlUpdate
     private Panel                pnlButtons      = null!;
@@ -102,6 +103,7 @@ partial class MainForm
         pnlUpdateRight = new Panel();
         btnDownload = new Button();
         btnInstallNow = new Button();
+        btnUpdateService = new Button();
         btnUpdateLater = new Button();
         pnlButtons = new Panel();
         btnFlow = new FlowLayoutPanel();
@@ -354,6 +356,7 @@ partial class MainForm
         pnlUpdateRight.BackColor = SystemColors.Info;
         pnlUpdateRight.Controls.Add(btnDownload);
         pnlUpdateRight.Controls.Add(btnInstallNow);
+        pnlUpdateRight.Controls.Add(btnUpdateService);
         pnlUpdateRight.Controls.Add(btnUpdateLater);
         pnlUpdateRight.Dock = DockStyle.Right;
         pnlUpdateRight.Location = new Point(817, 0);
@@ -386,9 +389,22 @@ partial class MainForm
         btnInstallNow.Text = "Install Now";
         btnInstallNow.Visible = false;
         btnInstallNow.Click += btnInstallNow_Click;
-        // 
+        //
+        // btnUpdateService  (shown only on a GUI/service version mismatch)
+        //
+        btnUpdateService.Anchor = AnchorStyles.None;
+        btnUpdateService.FlatStyle = FlatStyle.System;
+        btnUpdateService.Location = new Point(9, 10);
+        btnUpdateService.Margin = new Padding(4, 5, 4, 5);
+        btnUpdateService.Name = "btnUpdateService";
+        btnUpdateService.Size = new Size(129, 40);
+        btnUpdateService.TabIndex = 3;
+        btnUpdateService.Text = "Update Service";
+        btnUpdateService.Visible = false;
+        btnUpdateService.Click += btnUpdateService_Click;
+        //
         // btnUpdateLater
-        // 
+        //
         btnUpdateLater.Anchor = AnchorStyles.None;
         btnUpdateLater.FlatStyle = FlatStyle.System;
         btnUpdateLater.Location = new Point(146, 10);

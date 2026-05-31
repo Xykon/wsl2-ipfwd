@@ -46,6 +46,7 @@ FetchContent_MakeAvailable(miniupnpc)
 
 add_subdirectory(service)
 add_subdirectory(notify)
+add_subdirectory(updater)
 
 # ---------------------------------------------------------------------------
 # Optional Inno Setup installer target

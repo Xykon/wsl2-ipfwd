@@ -1,5 +1,6 @@
 #include "service.h"
 #include "net_util.h"
+#include "../common/app_paths.h"
 #include "../common/protocol.h"
 #include "../common/version.h"
 #include <nlohmann/json.hpp>
@@ -831,11 +832,8 @@ std::string Wsl2IpFwdService::HandleRequest(const std::string& body) {
 // ---- Logging ---------------------------------------------------------------
 
 void Wsl2IpFwdService::OpenLog() {
-    wchar_t data[MAX_PATH] = {};
-    SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, data);
-    std::wstring dir = std::wstring(data) + L"\\wsl2ipfwd";
-    std::filesystem::create_directories(dir);
-    std::wstring path = dir + L"\\service.log";
+    // Portable build -> next to the exe; installed build -> %ProgramData%.
+    std::wstring path = apppaths::DataDir() + L"\\service.log";
     logFile_ = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 }

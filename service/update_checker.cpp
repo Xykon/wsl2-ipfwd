@@ -140,16 +140,20 @@ bool UpdateChecker::FetchLatestRelease(std::string& outVersion, std::string& out
         auto j     = json::parse(body);
         outVersion = j.value("tag_name", "");
 
-        // Find the first .exe asset (the setup installer)
+        // Pick the portable zip asset (the GUI updates via updater.exe inside it).
+        // Prefer a name containing "portable"; fall back to the first .zip.
         if (j.contains("assets") && j["assets"].is_array()) {
+            std::string firstZip;
             for (auto& asset : j["assets"]) {
                 std::string name = asset.value("name", "");
-                if (name.size() >= 4 &&
-                    name.compare(name.size() - 4, 4, ".exe") == 0) {
-                    outUrl = asset.value("browser_download_url", "");
-                    break;
-                }
+                bool isZip = name.size() >= 4 &&
+                             name.compare(name.size() - 4, 4, ".zip") == 0;
+                if (!isZip) continue;
+                std::string url = asset.value("browser_download_url", "");
+                if (firstZip.empty()) firstZip = url;
+                if (name.find("portable") != std::string::npos) { outUrl = url; break; }
             }
+            if (outUrl.empty()) outUrl = firstZip;
         }
         return !outVersion.empty();
     } catch (...) {

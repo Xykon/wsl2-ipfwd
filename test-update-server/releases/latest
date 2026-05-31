@@ -5,6 +5,10 @@
   "prerelease": false,
   "assets": [
     {
+      "name": "wsl2ipfwd-portable-1.0.1.zip",
+      "browser_download_url": "http://localhost:8080/installer/wsl2ipfwd-portable-1.0.1.zip"
+    },
+    {
       "name": "wsl2ipfwd-setup.exe",
       "browser_download_url": "http://localhost:8080/installer/wsl2ipfwd-setup.exe"
     }

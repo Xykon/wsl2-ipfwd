@@ -170,6 +170,9 @@ public class ServiceStatus
     [JsonPropertyName("service_uptime_s")]   public long   ServiceUptimeS   { get; set; }
     [JsonPropertyName("active_forwardings")] public int    ActiveForwardings { get; set; }
 
+    // Version the service binary reports (compared against the GUI's own version).
+    [JsonPropertyName("service_version")] public string ServiceVersion { get; set; } = "";
+
     // WSL2 networking mode: "nat", "mirrored", or "virtioproxy".
     [JsonPropertyName("net_mode")] public string NetMode { get; set; } = "nat";
 

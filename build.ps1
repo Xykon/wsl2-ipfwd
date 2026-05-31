@@ -25,9 +25,12 @@
 param(
     [string]$Config    = "Release",
     [switch]$Clean,
-    [string]$UpdateUrl = ""   # override the update-checker URL baked into the binary
+    [string]$UpdateUrl = "",  # override the update-checker URL baked into the binary
                               # production: https://api.github.com/repos/<owner>/<repo>/releases/latest
                               # local test: http://localhost:8080/releases/latest
+    [switch]$Portable         # after building, package build\<cfg>\bin into
+                              # build\<cfg>\wsl2ipfwd-portable-<ver>.zip (build the
+                              # C# GUI into bin first so it's included)
 )
 
 $ErrorActionPreference = "Stop"
@@ -110,6 +113,40 @@ try {
     Pop-Location
 }
 
+# ---- Portable zip (optional) ------------------------------------------------
+# Mirrors the CI "Build portable zip" step so you can produce/test the package
+# locally. Stages build\<cfg>\bin (minus debug symbols) and zips it as
+# wsl2ipfwd-portable-<ver>.zip. Build the C# GUI into bin first so it is included:
+#   dotnet build gui-cs\gui-cs.csproj -c Release
+#   .\build.ps1 -Portable
+if ($Portable) {
+    Write-Host ""
+    Write-Host "Packaging portable zip..." -ForegroundColor Green
+
+    # Version comes from common\version.h (e.g. #define WSL2IPFWD_VERSION "1.0.0").
+    $verMatch = Select-String -Path "common\version.h" -Pattern '"([0-9]+\.[0-9]+\.[0-9]+)"'
+    $ver = if ($verMatch) { $verMatch.Matches[0].Groups[1].Value } else { "0.0.0" }
+
+    $bin   = "$BuildDir\bin"
+    $stage = "$BuildDir\portable"
+    $zip   = "$BuildDir\wsl2ipfwd-portable-$ver.zip"
+
+    if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+    New-Item -ItemType Directory -Force $stage | Out-Null
+    Copy-Item "$bin\*" $stage -Recurse -Force -Exclude *.pdb
+
+    if (-not (Test-Path "$stage\wsl2ipfwd-updater.exe")) {
+        Write-Warning "wsl2ipfwd-updater.exe missing from $bin — did the build succeed?"
+    }
+    if (-not (Test-Path "$stage\wsl2ipfwd-gui-cs.exe")) {
+        Write-Warning "wsl2ipfwd-gui-cs.exe missing — build the GUI first:"
+        Write-Warning "  dotnet build gui-cs\gui-cs.csproj -c $Config"
+    }
+
+    Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+    Write-Host "Portable zip: $absOut\wsl2ipfwd-portable-$ver.zip" -ForegroundColor Green
+}
+
 # ---- Next-step instructions (commands shown relative to the project root, --
 # which is where the shell returns to after this script finishes) -----------
 Write-Host ""
@@ -121,6 +158,9 @@ Write-Host ""
 Write-Host "Build the Inno Setup installer (requires Inno Setup 6/7):" -ForegroundColor Cyan
 Write-Host "  cmake --build $BuildDir --target installer" -ForegroundColor Cyan
 Write-Host "  -> output: $absOut\installer\wsl2ipfwd-setup.exe" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Create the portable zip (build the GUI into bin first):" -ForegroundColor Cyan
+Write-Host "  dotnet build gui-cs\gui-cs.csproj -c $Config; .\build.ps1 -Portable" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Test without installing:" -ForegroundColor Cyan
 Write-Host "  .\$BuildDir\bin\wsl2ipfwd-service.exe --debug" -ForegroundColor Cyan

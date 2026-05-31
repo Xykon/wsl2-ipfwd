@@ -84,6 +84,7 @@ Name: "desktopicon"; \
 ; C++ executables (no runtime DLLs needed — link only to Windows system libraries)
 Source: "{#BinDir}\wsl2ipfwd-service.exe";  DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\wsl2ipfwd-notify.exe";   DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\wsl2ipfwd-updater.exe";  DestDir: "{app}"; Flags: ignoreversion
 
 ; C# WinForms GUI (requires .NET 8 Desktop Runtime — install via winget or https://dotnet.microsoft.com)
 Source: "{#BinDir}\wsl2ipfwd-gui-cs.exe";                DestDir: "{app}"; Flags: ignoreversion

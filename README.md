@@ -32,6 +32,21 @@ Run `wsl2ipfwd-setup.exe` as Administrator. It will:
 
 To build from source, see [BUILD.md](BUILD.md).
 
+### Portable (no installer)
+
+Each release also publishes `wsl2ipfwd-portable-<version>.zip`. Extract it
+anywhere (e.g. a tools folder or USB drive) and run **`wsl2ipfwd-updater.exe`
+once** (it elevates) to register and start the service from that folder — or
+just launch the GUI and use **Service → Install Service**.
+
+In portable mode (i.e. when the app is **not** under `%ProgramFiles%`), all
+state lives next to the executables instead of the system folders:
+`config.json`, `service.log`, and `settings.json` are written to the app
+directory, so the whole installation is self-contained and movable.
+
+The portable build still requires the **.NET 8 Desktop Runtime** and registers a
+Windows service (which needs admin once).
+
 ---
 
 ## Getting Started
@@ -275,9 +290,15 @@ Service** depending on the current state.
 
 When *Automatically check for updates* is on, the service periodically checks
 the project's GitHub releases. If a newer version is available, a yellow bar
-appears at the top of the window with **Download**, then **Install Now** once
-the installer has downloaded (or **Later** to dismiss). You can also trigger a
-check immediately from **Settings → General → Check now**.
+appears at the top of the window with **Download**, then **Install Now** (or
+**Later** to dismiss). You can also trigger a check from
+**Settings → General → Check now**.
+
+Updates use the portable zip: clicking Install Now downloads it, extracts it to
+a temp folder, and launches the bundled `wsl2ipfwd-updater.exe` (one UAC
+prompt). The updater waits for the GUI to close, stops the service, copies the
+new files over the current installation (Program Files for an installed copy, or
+the portable folder), reinstalls the service, and reopens the GUI.
 
 ---
 

@@ -1,15 +1,14 @@
 #include "config.h"
+#include "app_paths.h"
 #include <windows.h>
-#include <shlobj.h>
 #include <fstream>
 #include <filesystem>
 
 namespace Config {
 
 std::wstring ConfigPath() {
-    wchar_t path[MAX_PATH] = {};
-    SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, path);
-    return std::wstring(path) + L"\\wsl2ipfwd\\config.json";
+    // Portable build -> next to the exe; installed build -> %ProgramData%.
+    return apppaths::DataDir() + L"\\config.json";
 }
 
 GlobalConfig Load() {

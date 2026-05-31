@@ -15,9 +15,7 @@
 #include "ipc_server.h"
 #include "update_checker.h"
 #include "upnp_manager.h"
-
-constexpr wchar_t SERVICE_NAME[] = L"wsl2ipfwd";
-constexpr wchar_t SERVICE_DISPLAY[] = L"WSL2 IP Forwarder Service";
+#include "../common/svc_control.h"   // SERVICE_NAME / SERVICE_DISPLAY + svc::*
 
 struct ActivePort {
     std::chrono::steady_clock::time_point lastSeen;

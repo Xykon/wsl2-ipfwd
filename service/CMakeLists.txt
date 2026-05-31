@@ -9,6 +9,8 @@ set(SERVICE_SOURCES
     upnp_manager.cpp
     net_util.cpp
     ../common/config.cpp
+    ../common/app_paths.cpp
+    ../common/svc_control.cpp
 )
 
 # ---- Update URL (configurable for local testing) ----------------------------

@@ -41,9 +41,14 @@ public partial class MainForm : Form
     private LocalSettings _localSettings = new();
 
     // ---- Update state -------------------------------------------------------
-    private bool    _updateCheckDone     = false;  // true once checked this connection
-    private bool    _updateDismissed     = false;  // true when user clicked Later
-    private string? _downloadedInstaller = null;   // path to downloaded setup.exe
+    private bool    _updateDismissed   = false;  // true when user clicked Later
+    private string? _extractedUpdater  = null;   // path to updater.exe from the downloaded zip
+
+    // Update bar can show a GitHub release or a GUI/service version mismatch.
+    private enum UpdateBarMode { None, Release, Mismatch }
+    private UpdateBarMode _updateBar         = UpdateBarMode.None;
+    private bool          _versionMismatch   = false;
+    private bool          _mismatchDismissed = false;
 
     // ---- Service-action button state ----------------------------------------
     private enum ServiceButtonMode { None, Restart, Start, Install }
@@ -221,6 +226,11 @@ public partial class MainForm : Form
         if (statusChanged) UpdateStatusPanel();
         if (portsChanged)  RebuildPortList();
         ShowConnected();   // always update the "Updated HH:mm:ss" timestamp
+
+        // Re-check for a pending update every poll. The service discovers updates
+        // asynchronously (and shows the balloon); polling here makes the in-app
+        // update bar appear during the session, not only after a restart.
+        await CheckForUpdateAsync();
     }
 
     // ---- UI update ----------------------------------------------------------
@@ -262,6 +272,39 @@ public partial class MainForm : Form
 
         var uptime = TimeSpan.FromSeconds(_lastStatus.ServiceUptimeS);
         lblUptime.Text = $"Uptime: {FormatUptime(uptime)}   ·   Active forwardings: {_lastStatus.ActiveForwardings}";
+
+        RefreshVersionMismatch();
+    }
+
+    /// <summary>
+    /// Shows the update bar in "mismatch" mode when the running service reports a
+    /// different version than this GUI. The single Update Service button reinstalls
+    /// the service from this app's folder. Takes priority over the release bar.
+    /// </summary>
+    private void RefreshVersionMismatch()
+    {
+        string svc = _lastStatus?.ServiceVersion ?? "";
+        string gui = GetCurrentVersion();
+        _versionMismatch = !string.IsNullOrEmpty(svc) && svc != gui;
+
+        if (_versionMismatch && !_mismatchDismissed)
+        {
+            lblUpdateText.Text       = $"  🔄  Service is version {svc} but the app is {gui} — update the service to match.";
+            btnUpdateService.Visible = true;
+            btnDownload.Visible      = false;
+            btnInstallNow.Visible    = false;
+            btnUpdateLater.Visible   = true;
+            pnlUpdate.Visible        = true;
+            _updateBar = UpdateBarMode.Mismatch;
+        }
+        else if (_updateBar == UpdateBarMode.Mismatch)
+        {
+            // Mismatch cleared (or dismissed) — hide and re-evaluate a release update.
+            btnUpdateService.Visible = false;
+            pnlUpdate.Visible        = false;
+            _updateBar               = UpdateBarMode.None;
+            // The next poll's CheckForUpdateAsync re-shows a release bar if one is pending.
+        }
     }
 
     private void RebuildPortList()
@@ -357,18 +400,11 @@ public partial class MainForm : Form
 
         // Refresh the service-action button on the first tick after (re-)connection
         if (!_wasConnected) { _wasConnected = true; UpdateServiceButton(); }
-
-        // Check for available updates once per connection
-        if (!_updateCheckDone && !_updateDismissed)
-        {
-            _updateCheckDone = true;
-            _ = CheckForUpdateAsync();
-        }
+        // (Update-availability is polled in RefreshDataAsync every cycle.)
     }
 
     private void ShowDisconnected()
     {
-        _updateCheckDone      = false;  // re-check when we reconnect
         _lastStatusJson       = "";     // reset cache so next successful poll triggers a full UI rebuild
         _lastPortsFingerprint = "";
         tsslStatus.Text       = "○  Service not running — retrying…";
@@ -652,6 +688,7 @@ public partial class MainForm : Form
     /// </summary>
     private async Task CheckForUpdateAsync()
     {
+        if (_versionMismatch) return;   // the mismatch bar takes priority
         if (_updateDismissed) return;
 
         var resp = await _ipc.SendAsync(new JsonObject { ["cmd"] = Protocol.CmdGetUpdateInfo });
@@ -660,32 +697,31 @@ public partial class MainForm : Form
         bool available = data["available"]?.GetValue<bool>() ?? false;
         if (!available)
         {
-            if (pnlUpdate.Visible) pnlUpdate.Visible = false;
+            if (_updateBar == UpdateBarMode.Release)
+            {
+                pnlUpdate.Visible = false;
+                _updateBar = UpdateBarMode.None;
+            }
             return;
         }
+
+        // Already showing the release bar — leave it alone so a re-poll doesn't
+        // clobber an in-progress "Downloading…/Install Now" state.
+        if (_updateBar == UpdateBarMode.Release) return;
 
         string version = data["version"]?.GetValue<string>() ?? "";
         string url     = data["url"]?.GetValue<string>()     ?? "";
 
-        lblUpdateText.Text    = $"  🔔  Version {version} is available  ·  You are running {GetCurrentVersion()}";
-        btnDownload.Tag       = url;   // stash download URL for the click handler
-        btnDownload.Text      = "Download";
-        btnDownload.Enabled   = true;
-        btnDownload.Visible   = true;
-        btnInstallNow.Visible = false;
-        pnlUpdate.Visible     = true;
-    }
-
-    /// <summary>Waits <paramref name="delayMs"/> ms then re-runs the update check.</summary>
-    private async Task ScheduleUpdateCheckAsync(int delayMs = 8000)
-    {
-        await Task.Delay(delayMs);
-        if (!IsDisposed && _ipc.IsConnected)
-        {
-            _updateCheckDone = false;
-            await CheckForUpdateAsync();
-            _updateCheckDone = true;
-        }
+        lblUpdateText.Text       = $"  🔔  Version {version} is available  ·  You are running {GetCurrentVersion()}";
+        btnDownload.Tag          = url;   // stash download URL for the click handler
+        btnDownload.Text         = "Download";
+        btnDownload.Enabled      = true;
+        btnDownload.Visible      = true;
+        btnInstallNow.Visible    = false;
+        btnUpdateService.Visible = false;
+        btnUpdateLater.Visible   = true;
+        pnlUpdate.Visible        = true;
+        _updateBar = UpdateBarMode.Release;
     }
 
     /// <summary>
@@ -737,19 +773,35 @@ public partial class MainForm : Form
         if (string.IsNullOrEmpty(url)) return;
 
         btnDownload.Enabled = false;
-        lblUpdateText.Text  = "  ⬇  Downloading installer…";
+        lblUpdateText.Text  = "  ⬇  Downloading update…";
 
         try
         {
-            string dest = Path.Combine(Path.GetTempPath(), "wsl2ipfwd-setup.exe");
-            using var http = new HttpClient();
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("wsl2ipfwd-gui/1.0");
-            using var stream = await http.GetStreamAsync(url);
-            using var file   = new FileStream(dest, FileMode.Create, FileAccess.Write);
-            await stream.CopyToAsync(file);
+            string tempZip    = Path.Combine(Path.GetTempPath(), "wsl2ipfwd-update.zip");
+            string extractDir = Path.Combine(Path.GetTempPath(),
+                                             "wsl2ipfwd-update-" + Guid.NewGuid().ToString("N"));
 
-            _downloadedInstaller  = dest;
-            lblUpdateText.Text    = "  ✅  Installer ready";
+            using (var http = new HttpClient())
+            {
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("wsl2ipfwd-gui/1.0");
+                using var stream = await http.GetStreamAsync(url);
+                using var file   = new FileStream(tempZip, FileMode.Create, FileAccess.Write);
+                await stream.CopyToAsync(file);
+            }
+
+            await Task.Run(() =>
+            {
+                if (Directory.Exists(extractDir)) Directory.Delete(extractDir, true);
+                System.IO.Compression.ZipFile.ExtractToDirectory(tempZip, extractDir);
+            });
+
+            // updater.exe sits at the zip root (or nested) — find it.
+            _extractedUpdater = Directory
+                .EnumerateFiles(extractDir, "wsl2ipfwd-updater.exe", SearchOption.AllDirectories)
+                .FirstOrDefault()
+                ?? throw new FileNotFoundException("updater not found in the downloaded package.");
+
+            lblUpdateText.Text    = "  ✅  Update ready — click Install Now";
             btnInstallNow.Visible = true;
             btnDownload.Visible   = false;
         }
@@ -762,24 +814,72 @@ public partial class MainForm : Form
 
     private void btnInstallNow_Click(object sender, EventArgs e)
     {
-        if (_downloadedInstaller is null || !File.Exists(_downloadedInstaller)) return;
+        if (_extractedUpdater is null || !File.Exists(_extractedUpdater)) return;
 
-        // Launch the installer (requires admin — UAC prompt fires automatically via ShellExecute)
-        Process.Start(new ProcessStartInfo
+        try
         {
-            FileName        = _downloadedInstaller,
-            UseShellExecute = true
-        });
+            // Launch the elevated updater (its manifest triggers a single UAC prompt).
+            // It waits for this GUI to exit, stops the service, copies the new files
+            // into our own directory, then reinstalls + restarts the service.
+            Process.Start(new ProcessStartInfo
+            {
+                FileName        = _extractedUpdater,
+                Arguments       = $"--update --dest \"{AppPaths.AppDir}\" --wait-pid {Environment.ProcessId}",
+                UseShellExecute = true
+            });
+        }
+        catch (System.ComponentModel.Win32Exception we) when (we.NativeErrorCode == 1223)
+        {
+            return;   // user cancelled the UAC prompt
+        }
+        catch (Exception ex)
+        {
+            ShowError($"Failed to launch the updater: {ex.Message}");
+            return;
+        }
 
-        // Exit the GUI; the service keeps running and the installer will stop it
-        // before replacing the installed files.
+        // Exit so the updater can replace our files; it reopens the GUI when done.
         QuitApp();
     }
 
     private void btnUpdateLater_Click(object sender, EventArgs e)
     {
-        _updateDismissed  = true;
+        if (_updateBar == UpdateBarMode.Mismatch) _mismatchDismissed = true;
+        else                                      _updateDismissed   = true;
         pnlUpdate.Visible = false;
+        _updateBar = UpdateBarMode.None;
+    }
+
+    private async void btnUpdateService_Click(object sender, EventArgs e)
+    {
+        string updater = Path.Combine(AppPaths.AppDir, "wsl2ipfwd-updater.exe");
+        if (!File.Exists(updater))
+        {
+            ShowError("wsl2ipfwd-updater.exe was not found next to the application.");
+            return;
+        }
+
+        try
+        {
+            // Standalone updater (elevates via its manifest): uninstall the old
+            // service and install + start the new one from this app's folder.
+            Process.Start(new ProcessStartInfo { FileName = updater, UseShellExecute = true });
+        }
+        catch (System.ComponentModel.Win32Exception we) when (we.NativeErrorCode == 1223)
+        {
+            return;   // user cancelled the UAC prompt
+        }
+        catch (Exception ex)
+        {
+            ShowError($"Failed to launch the updater: {ex.Message}");
+            return;
+        }
+
+        btnUpdateService.Enabled = false;
+        lblUpdateText.Text       = "  ⏳  Updating service…";
+        await Task.Delay(4000);          // let the elevated updater reinstall + start
+        await ForceRefreshAsync();        // reconnect & re-evaluate versions (clears the bar if matched)
+        btnUpdateService.Enabled = true;
     }
 
     // ---- Service action (Restart / Install) ------------------------------------

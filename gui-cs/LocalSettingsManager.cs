@@ -1,4 +1,6 @@
-// Loads and saves GUI-only settings to %AppData%\WSL2IpFwd\settings.json.
+// Loads and saves GUI-only settings to settings.json.
+//   Installed build -> %AppData%\WSL2IpFwd\settings.json
+//   Portable build  -> settings.json next to the executable
 // These settings are never sent to the service; they control local UI behaviour
 // (close/minimize behaviour, port filter list, etc.).
 // All I/O is best-effort — failures are silently swallowed.
@@ -9,9 +11,8 @@ namespace Wsl2IpFwdGui;
 
 public static class LocalSettingsManager
 {
-    private static readonly string SettingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "WSL2IpFwd", "settings.json");
+    private static readonly string SettingsPath =
+        Path.Combine(AppPaths.SettingsDir, "settings.json");
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 

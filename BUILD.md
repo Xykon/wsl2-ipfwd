@@ -31,11 +31,19 @@ No package manager (vcpkg, NuGet, etc.) is needed.
 
 # Clean rebuild:
 .\build.ps1 -Clean
+
+# Package the portable zip (build the C# GUI into bin first, see below):
+.\build.ps1 -Portable
 ```
 
 Outputs in `build\Release\bin\`:
 - `wsl2ipfwd-service.exe` — Windows service
 - `wsl2ipfwd-notify.exe` — tray balloon notification helper
+- `wsl2ipfwd-updater.exe` — elevated updater (portable/auto-update helper)
+
+`-Portable` additionally produces `build\Release\wsl2ipfwd-portable-<ver>.zip`
+(everything in `bin\` minus debug symbols). Build the C# GUI into `bin\` first so
+it is included.
 
 > cmake is bundled with Visual Studio and is found automatically.
 > No separate cmake install is required.

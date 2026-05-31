@@ -1,2 +1,3 @@
-# Installer binaries are copied here by start.ps1 — don't commit them.
+# Installer / portable artifacts are copied here by start.ps1 — don't commit them.
 *.exe
+*.zip

@@ -10,7 +10,7 @@ public:
     struct UpdateInfo {
         bool        available = false;
         std::string version;  // e.g. "v1.2.3"
-        std::string url;      // browser_download_url of the setup exe
+        std::string url;      // browser_download_url of the portable zip
     };
 
     // Called every monitor loop tick.  Returns true (and populates the pending

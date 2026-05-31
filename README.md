@@ -198,6 +198,11 @@ the moment they are detected in WSL2 — no per-port clicking.
   `43000-44000` in *Debian* with two separate rules.
 - The **Public / Private / Domain** checkboxes set the firewall profiles applied
   to *all* auto-forwarded ports.
+- **Apply to existing rules** (checked by default) — normally auto-forward only
+  catches ports the *first time* they appear. With this checked, clicking
+  **Apply** also retroactively enables forwarding for any port that is *already
+  detected* and matches a rule. Uncheck it to apply rules only to ports detected
+  from now on (e.g. to preserve a port you manually disabled).
 
 Auto-forwarding deliberately never enables UPnP — internet exposure is always a
 manual, per-port decision.

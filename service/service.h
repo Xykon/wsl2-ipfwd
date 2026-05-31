@@ -72,6 +72,12 @@ private:
     // for the given distribution. The effective filter set for a distro is its
     // distro-scoped entries plus all general (untagged) entries.
     bool IsPortFilteredOut(uint16_t port, const std::string& distro) const;
+
+    // True if `port` in `distro` matches an auto-forward expression. A rule
+    // scoped to this distro takes precedence over a general (untagged) rule.
+    // On a match, mappedLocal receives the mapped local port (0 = same as port).
+    bool MatchAutoForward(uint16_t port, const std::string& distro,
+                          uint16_t& mappedLocal) const;
     // Windows-side listen port for a config entry. In mirrored/virtioproxy modes
     // custom local ports don't work (the portproxy can't hairpin to the shared
     // host IP), so this returns the WSL port and ignores cfg.local_port.

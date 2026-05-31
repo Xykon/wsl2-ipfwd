@@ -245,6 +245,29 @@ static uint16_t MappedLocalPort(uint16_t port,
 // be hidden/ignored entirely.  An empty expression list allows everything.
 //   • blacklist: filtered out when it matches any expression
 //   • whitelist: filtered out when it matches no expression
+bool Wsl2IpFwdService::MatchAutoForward(uint16_t port, const std::string& distro,
+                                        uint16_t& mappedLocal) const {
+    mappedLocal = 0;
+    // Two-pass: a rule scoped to this distro takes precedence over a general
+    // (untagged) rule. Pass 0 = distro-scoped only, pass 1 = general.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i < config_.auto_forward_expressions.size(); ++i) {
+            const std::string& scope = (i < config_.auto_forward_distros.size())
+                                       ? config_.auto_forward_distros[i] : std::string{};
+            bool isScoped = !scope.empty();
+            if (pass == 0 && (!isScoped || scope != distro)) continue;  // this distro only
+            if (pass == 1 && isScoped) continue;                        // general only
+            if (MatchesExpression(port, config_.auto_forward_expressions[i])) {
+                const std::string le = (i < config_.auto_forward_local_expressions.size())
+                                       ? config_.auto_forward_local_expressions[i] : std::string{};
+                mappedLocal = MappedLocalPort(port, config_.auto_forward_expressions[i], le);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool Wsl2IpFwdService::IsPortFilteredOut(uint16_t port, const std::string& distro) const {
     // Effective filter set for this distro = its distro-scoped entries plus all
     // general (untagged) entries. An entry with no parallel distro tag is general.
@@ -394,26 +417,8 @@ void Wsl2IpFwdService::ProcessDistro(const std::string& distro) {
         if (dports.count(port)) { seen.insert(port); continue; }
         seen.insert(port);
 
-        // Two-pass match: a rule scoped to this distro takes precedence over a
-        // general (untagged) rule. Pass 0 = distro-scoped only, pass 1 = general.
-        bool     autoForward = false;
         uint16_t mappedLocal = 0;
-        for (int pass = 0; pass < 2 && !autoForward; ++pass) {
-            for (size_t i = 0; i < config_.auto_forward_expressions.size(); ++i) {
-                const std::string& scope = (i < config_.auto_forward_distros.size())
-                                           ? config_.auto_forward_distros[i] : std::string{};
-                bool isScoped = !scope.empty();
-                if (pass == 0 && (!isScoped || scope != distro)) continue;  // this distro only
-                if (pass == 1 && isScoped) continue;                        // general only
-                if (MatchesExpression(port, config_.auto_forward_expressions[i])) {
-                    autoForward = true;
-                    const std::string le = (i < config_.auto_forward_local_expressions.size())
-                                           ? config_.auto_forward_local_expressions[i] : std::string{};
-                    mappedLocal = MappedLocalPort(port, config_.auto_forward_expressions[i], le);
-                    break;
-                }
-            }
-        }
+        bool     autoForward = MatchAutoForward(port, distro, mappedLocal);
 
         if (autoForward) {
             PortConfig af;
@@ -865,6 +870,31 @@ std::string Wsl2IpFwdService::HandleRequest(const std::string& body) {
                     if (seenPorts_.count(distro))   seenPorts_[distro].erase(port);
                     Log("[" + distro + "] port " + std::to_string(port) +
                         " removed (filtered out by updated whitelist/blacklist).");
+                }
+            }
+
+            // "Apply to existing rules": retroactively enable auto-forwarding for
+            // currently-detected ports that match an auto-forward rule but aren't
+            // already enabled. The next monitor tick forwards them.
+            if (req.value("apply_auto_forward_existing", false)) {
+                for (auto& [distro, dets] : detectedPorts_) {
+                    auto& dports = config_.distro_ports[distro];
+                    for (auto& pinfo : dets) {
+                        uint16_t port = pinfo.port;
+                        if (IsPortFilteredOut(port, distro)) continue;
+                        uint16_t mappedLocal = 0;
+                        if (!MatchAutoForward(port, distro, mappedLocal)) continue;
+                        PortConfig& cfg = dports[port];
+                        if (cfg.enabled) continue;   // leave already-configured ports as-is
+                        cfg.enabled    = true;
+                        cfg.local_port = mappedLocal;
+                        cfg.fw_public  = config_.auto_forward_fw_public;
+                        cfg.fw_private = config_.auto_forward_fw_private;
+                        cfg.fw_domain  = config_.auto_forward_fw_domain;
+                        if (seenPorts_.count(distro)) seenPorts_[distro].insert(port);
+                        Log("[" + distro + "] auto-forward applied to existing port "
+                            + std::to_string(port) + ".");
+                    }
                 }
             }
 

@@ -489,12 +489,16 @@ public partial class MainForm : Form
 
         // --- Service-side settings ---
         var updated  = dlg.GetConfig();
+        var local    = dlg.GetLocalSettings();
         var dataNode = JsonNode.Parse(JsonSerializer.Serialize(updated))!;
 
         var setResp = await _ipc.SendAsync(new JsonObject
         {
             ["cmd"]  = Protocol.CmdSetConfig,
-            ["data"] = dataNode
+            ["data"] = dataNode,
+            // One-shot: retroactively enable auto-forward for already-detected
+            // matching ports when the user left "Apply to existing rules" checked.
+            ["apply_auto_forward_existing"] = local.ApplyAutoForwardToExisting
         });
 
         if (setResp?["ok"]?.GetValue<bool>() != true)
@@ -504,7 +508,7 @@ public partial class MainForm : Form
         }
 
         // --- GUI-only (local) settings ---
-        _localSettings = dlg.GetLocalSettings();
+        _localSettings = local;
         LocalSettingsManager.Save(_localSettings);
 
         await ForceRefreshAsync();

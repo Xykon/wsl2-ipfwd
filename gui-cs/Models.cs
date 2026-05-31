@@ -166,6 +166,14 @@ public class LocalSettings
     /// </summary>
     [JsonPropertyName("auto_forward_entries")]
     public List<PortFilterEntry> AutoForwardEntries { get; set; } = new();
+
+    /// <summary>
+    /// When true (default), applying auto-forward settings also retroactively
+    /// enables forwarding for already-detected ports that match a rule — not
+    /// just ports detected in the future. Sent to the service per Apply.
+    /// </summary>
+    [JsonPropertyName("apply_auto_forward_to_existing")]
+    public bool ApplyAutoForwardToExisting { get; set; } = true;
 }
 
 /// <summary>One entry from the list_distros response.</summary>

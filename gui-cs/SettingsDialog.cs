@@ -60,6 +60,7 @@ public partial class SettingsDialog : Form
     private DataGridViewTextBoxColumn colAutoFwdComment= null!;
     private Button                   btnAutoFwdAdd     = null!;
     private Button                   btnAutoFwdRemove  = null!;
+    private CheckBox                 chkApplyExisting  = null!;
     private Label                    lblFwLabel        = null!;
     private CheckBox                 chkFwPublic       = null!;
     private CheckBox                 chkFwPrivate      = null!;
@@ -148,6 +149,7 @@ public partial class SettingsDialog : Form
         chkFwPublic.Checked  = _origCfg.AutoForwardFwPublic;
         chkFwPrivate.Checked = _origCfg.AutoForwardFwPrivate;
         chkFwDomain.Checked  = _origCfg.AutoForwardFwDomain;
+        chkApplyExisting.Checked = _origLocal.ApplyAutoForwardToExisting;
 
         // Port Filter tab
         rbWhitelist.Checked = _origLocal.PortFilterIsWhitelist;
@@ -396,7 +398,8 @@ public partial class SettingsDialog : Form
         SuppressTrayNotification = chkSuppressTray.Checked,
         PortFilterIsWhitelist    = rbWhitelist.Checked,
         PortFilters              = ExtractGridEntries(dgvFilter),
-        AutoForwardEntries       = ExtractAutoFwdEntries()
+        AutoForwardEntries       = ExtractAutoFwdEntries(),
+        ApplyAutoForwardToExisting = chkApplyExisting.Checked
     };
 
     /// <summary>
@@ -1004,12 +1007,21 @@ public partial class SettingsDialog : Form
         this.chkFwDomain.Location = new Point(347, 211);
         this.chkFwDomain.Name     = "chkFwDomain";
 
+        // Apply-to-existing — when checked, applying these rules also enables
+        // forwarding for already-detected matching ports (not just future ones).
+        this.chkApplyExisting          = new CheckBox();
+        this.chkApplyExisting.Text     = "Apply to existing rules";
+        this.chkApplyExisting.AutoSize = true;
+        this.chkApplyExisting.Checked  = true;
+        this.chkApplyExisting.Location = new Point(8, 240);
+        this.chkApplyExisting.Name     = "chkApplyExisting";
+
         // Conflict warning — hidden until UpdateConflictWarnings() finds an issue
         this.lblAutoFwdConflict           = new Label();
         this.lblAutoFwdConflict.Text      = "";
         this.lblAutoFwdConflict.AutoSize  = false;
-        this.lblAutoFwdConflict.Location  = new Point(8, 242);
-        this.lblAutoFwdConflict.Size      = new Size(440, 52);
+        this.lblAutoFwdConflict.Location  = new Point(8, 266);
+        this.lblAutoFwdConflict.Size      = new Size(440, 80);
         this.lblAutoFwdConflict.ForeColor = Color.FromArgb(180, 0, 0);
         this.lblAutoFwdConflict.Font      = new Font("Segoe UI", 8.5f);
         this.lblAutoFwdConflict.Name      = "lblAutoFwdConflict";
@@ -1023,6 +1035,7 @@ public partial class SettingsDialog : Form
         this.tabAutoFwd.Controls.Add(this.chkFwPublic);
         this.tabAutoFwd.Controls.Add(this.chkFwPrivate);
         this.tabAutoFwd.Controls.Add(this.chkFwDomain);
+        this.tabAutoFwd.Controls.Add(this.chkApplyExisting);
         this.tabAutoFwd.Controls.Add(this.lblAutoFwdConflict);
 
         // ====================================================================
